@@ -319,30 +319,30 @@ def patch_fog_dll(file_path):
         timestamp = binary.header.time_date_stamps
 
         # Define timestamps for known Diablo II Fog.dll versions. These values are derived from various D2 releases.
-        VERSION_100_TIMESTAMP = 0x392ec7d4
-        VERSION_101_TIMESTAMP = 0x3957d5f7
-        VERSION_102_TIMESTAMP = 0x3966576f
-        VERSION_103_TIMESTAMP = 0x3986136c
-        VERSION_104B_TIMESTAMP = 0x3a3b5c92
-        VERSION_104C_TIMESTAMP = 0x3a3b5c92
-        VERSION_105_TIMESTAMP = 0x3a720eee
-        VERSION_105B_TIMESTAMP = 0x3a79c9d4
-        VERSION_106_TIMESTAMP = 0x3ade4595
-        VERSION_106B_TIMESTAMP = 0x3b02c8ec
-        VERSION_107_TIMESTAMP = 0x3af6e1d9
-        VERSION_108_TIMESTAMP = 0x3b2eb277
-        VERSION_109_TIMESTAMP = 0x3b7c4e0f
-        VERSION_109B_TIMESTAMP = 0x3b7c4e0f
-        VERSION_109D_TIMESTAMP = 0x3c06fcd3
+        VERSION_100_TIMESTAMP       = 0x392ec7d4
+        VERSION_101_TIMESTAMP       = 0x3957d5f7
+        VERSION_102_TIMESTAMP       = 0x3966576f
+        VERSION_103_TIMESTAMP       = 0x3986136c
+        VERSION_104B_TIMESTAMP      = 0x3a3b5c92
+        VERSION_104C_TIMESTAMP      = 0x3a3b5c92
+        VERSION_105_TIMESTAMP       = 0x3a720eee
+        VERSION_105B_TIMESTAMP      = 0x3a79c9d4
+        VERSION_106_TIMESTAMP       = 0x3ade4595
+        VERSION_106B_TIMESTAMP      = 0x3b02c8ec
+        VERSION_107_TIMESTAMP       = 0x3af6e1d9
+        VERSION_108_TIMESTAMP       = 0x3b2eb277
+        VERSION_109_TIMESTAMP       = 0x3b7c4e0f
+        VERSION_109B_TIMESTAMP      = 0x3b7c4e0f
+        VERSION_109D_TIMESTAMP      = 0x3c06fcd3
         VERSION_100_BETA1_TIMESTAMP = 0x3f0472c7
         VERSION_100_BETA2_TIMESTAMP = 0x3f24b36e
-        VERSION_110_TIMESTAMP = 0x3f8a5c4f
-        VERSION_111_TIMESTAMP = 0x42e6c1f0
-        VERSION_111B_TIMESTAMP = 0x43028af2
-        VERSION_112A_TIMESTAMP = 0x483cb768
-        VERSION_113_TIMESTAMP = 0x4b95c0aa
-        VERSION_113C_TIMESTAMP = 0x4b95c0aa
-        VERSION_113D_TIMESTAMP = 0x4e9de32b
+        VERSION_110_TIMESTAMP       = 0x3f8a5c4f
+        VERSION_111_TIMESTAMP       = 0x42e6c1f0
+        VERSION_111B_TIMESTAMP      = 0x43028af2
+        VERSION_112A_TIMESTAMP      = 0x483cb768
+        VERSION_113_TIMESTAMP       = 0x4b95c0aa
+        VERSION_113C_TIMESTAMP      = 0x4b95c0aa
+        VERSION_113D_TIMESTAMP      = 0x4e9de32b
 
         version_names = {
             VERSION_100_TIMESTAMP:       "1.00",
@@ -404,8 +404,8 @@ def patch_fog_dll(file_path):
             addr_time_calc_ord = resolve_exported_symbol(binary, 10055)  # Main time retrieval routine
 
         # Imported Windows API functions (resolved by name from the export table or IAT)
-        addr_init_crit_func = resolve_imported_symbol(binary, "InitializeCriticalSection")
-        addr_get_tick_func = resolve_imported_symbol(binary, "GetTickCount")
+        addr_init_crit_func  = resolve_imported_symbol(binary, "InitializeCriticalSection")
+        addr_get_tick_func   = resolve_imported_symbol(binary, "GetTickCount")
         addr_enter_crit_func = resolve_imported_symbol(binary, "EnterCriticalSection")
         addr_leave_crit_func = resolve_imported_symbol(binary, "LeaveCriticalSection")
 
@@ -416,14 +416,14 @@ def patch_fog_dll(file_path):
 
         # Display all resolved addresses for verification and debugging purposes
         symbol_map = {
-            "InitializeCriticalSection_IAT": addr_init_crit_func,
-            "GetTickCount_IAT": addr_get_tick_func,
-            "EnterCriticalSection_IAT": addr_enter_crit_func,
-            "LeaveCriticalSection_IAT": addr_leave_crit_func,
-            f"Fog.dll_TimeInitOrd": addr_time_init_ord,
-            f"Fog.dll_TimeCalcOrd": addr_time_calc_ord,
-            "Fog.dll_InternalTime": addr_internal_time_func,
-            "Fog.dll_TimeInit": addr_time_init_func,
+            "InitializeCriticalSection_IAT":  addr_init_crit_func,
+            "GetTickCount_IAT":               addr_get_tick_func,
+            "EnterCriticalSection_IAT":       addr_enter_crit_func,
+            "LeaveCriticalSection_IAT":       addr_leave_crit_func,
+            f"Fog.dll_TimeInitOrd":           addr_time_init_ord,
+            f"Fog.dll_TimeCalcOrd":           addr_time_calc_ord,
+            "Fog.dll_InternalTime":           addr_internal_time_func,
+            "Fog.dll_TimeInit":               addr_time_init_func,
             "Fog.dll_CachedTimeValue_Global": addr_cached_time_value,
             "Fog.dll_CriticalSection_Struct": addr_crit_section_struct,
             "Fog.dll_CachedTickCount_Global": addr_cached_tick_count,
