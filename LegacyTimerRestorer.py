@@ -1,3 +1,23 @@
+"""
+Diablo II Legacy Timer Restorer for Fog.dll (Pre-1.06 Caching Logic)
+
+This script restores the pre-1.06 critical-section-based time caching logic
+used in Fog.dll, part of the Diablo II game engine. Starting with version 1.06,
+Blizzard replaced this logic with atomic operations (`cmpxchg`), which are
+incompatible with some emulated or virtual environments such as DOSBox Pure.
+
+The restoration process:
+- Reintroduces thread-safe time caching using `InitializeCriticalSection`.
+- Eliminates use of unsupported atomic operations (`cmpxchg`) introduced in 1.06.
+- Improves compatibility with virtualized and retro PC gaming setups.
+
+Tools Used:
+- LIEF: For parsing and modifying PE (Portable Executable) binaries.
+- Capstone: For disassembling x86 machine code.
+- Keystone: For assembling x86 instructions into machine code.
+- Colorama: For colored CLI output.
+"""
+
 import lief
 from capstone import Cs, CS_ARCH_X86, CS_MODE_32, CS_GRP_RET
 from keystone import Ks, KS_ARCH_X86, KS_MODE_32
