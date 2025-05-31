@@ -224,6 +224,45 @@ def locate_time_initializer(address_time_init, binary, code_section):
     raise RuntimeError("Could not locate time initializer function pattern.")
 
 
+def extract_critical_section_address(addr_time_init_func: int, addr_initialize_crit: int, binary, code_section) -> int:
+    """
+    Extracts the address of the global CRITICAL_SECTION structure used in Fog.dll's time cache.
+
+    Looks for the instruction pattern:
+        push <imm>
+        call [InitializeCriticalSection]
+
+    This pattern initializes a static CRITICAL_SECTION object.
+
+    Args:
+        addr_time_init_func (int): VA of the time initialization function.
+        addr_initialize_crit (int): IAT VA of InitializeCriticalSection.
+        binary (lief.PE.Binary): Parsed PE binary.
+        code_section (lief.PE.Section): .text section of the binary.
+
+    Returns:
+        int: The global address passed to InitializeCriticalSection.
+
+    Raises:
+        RuntimeError: If the instruction pattern is not found.
+    """
+    instructions = disassemble_function(addr_time_init_func, binary, code_section)
+
+    for i in range(len(instructions) - 1):
+        push_instr = instructions[i]
+        call_instr = instructions[i + 1]
+
+        if push_instr.mnemonic == "push" and call_instr.mnemonic == "call":
+            if (call_instr.operands and
+                call_instr.operands[0].type == X86_OP_MEM and
+                    call_instr.operands[0].value.mem.disp == addr_initialize_crit):
+
+                if push_instr.operands and push_instr.operands[0].type == X86_OP_IMM:
+                    return push_instr.operands[0].value.imm
+
+    raise RuntimeError("Failed to locate critical section address near call to InitializeCriticalSection.")
+
+
 def extract_time_cache_addresses(address_time_main, address_get_tick, binary, code_section):
     """
     Scans disassembled code to identify critical addresses related to Fog.dll's internal time caching logic.
@@ -285,44 +324,6 @@ def extract_time_cache_addresses(address_time_main, address_get_tick, binary, co
         addr_cached_tick_count,
     )
 
-
-def extract_critical_section_address(addr_time_init_func: int, addr_initialize_crit: int, binary, code_section) -> int:
-    """
-    Extracts the address of the global CRITICAL_SECTION structure used in Fog.dll's time cache.
-
-    Looks for the instruction pattern:
-        push <imm>
-        call [InitializeCriticalSection]
-
-    This pattern initializes a static CRITICAL_SECTION object.
-
-    Args:
-        addr_time_init_func (int): VA of the time initialization function.
-        addr_initialize_crit (int): IAT VA of InitializeCriticalSection.
-        binary (lief.PE.Binary): Parsed PE binary.
-        code_section (lief.PE.Section): .text section of the binary.
-
-    Returns:
-        int: The global address passed to InitializeCriticalSection.
-
-    Raises:
-        RuntimeError: If the instruction pattern is not found.
-    """
-    instructions = disassemble_function(addr_time_init_func, binary, code_section)
-
-    for i in range(len(instructions) - 1):
-        push_instr = instructions[i]
-        call_instr = instructions[i + 1]
-
-        if push_instr.mnemonic == "push" and call_instr.mnemonic == "call":
-            if (call_instr.operands and
-                call_instr.operands[0].type == X86_OP_MEM and
-                call_instr.operands[0].value.mem.disp == addr_initialize_crit):
-
-                if push_instr.operands and push_instr.operands[0].type == X86_OP_IMM:
-                    return push_instr.operands[0].value.imm
-
-    raise RuntimeError("Failed to locate critical section address near call to InitializeCriticalSection.")
 
 def patch_fog_dll(file_path):
     print(Fore.WHITE + f"\n--- Processing: {file_path} ---")
