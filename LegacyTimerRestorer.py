@@ -195,21 +195,27 @@ def locate_time_initializer(address_time_init, binary, code_section):
     """
     Identifies the internal implementation of the time initializer routine exported by Fog.dll.
 
-    The exported ordinals (e.g., 10017 or 10019) point directly to a routine that includes a `call` to the actual
-    internal time initialization function. This function disassembles that routine and extracts the target address by
-    identifying a `call` followed by a `lea` instruction, which commonly precedes setup logic using the return value.
+    The exported ordinal (e.g., 10017 or 10019) refers to a thin wrapper function that delegates to the actual internal
+    initializer. This wrapper typically uses a `call` to the internal function, followed immediately by a `lea`
+    instruction which sets up a local variable or frame using the return address from the call (a common idiom for
+    position-independent logic).
+
+    The instruction pattern matched is:
+        call <imm>       # call to internal initializer
+        lea reg, [esp+X] # retrieve return address or setup frame
+
+    This function disassembles the wrapper and extracts the target address of the `call` preceding the `lea`.
 
     Args:
-        address_time_init (int): The virtual address of the exported time initializer routine.
-        binary (lief.PE.Binary): The parsed LIEF PE binary object.
+        address_time_init (int): Virtual address of the exported time initializer routine.
+        binary (lief.PE.Binary): Parsed LIEF PE binary object.
         code_section (lief.PE.Section): The `.text` (code) section from the binary.
 
     Returns:
-        int: The virtual address (VA) of the internal time initialization function.
+        int: Virtual address of the internal time initialization function.
 
     Raises:
-        RuntimeError: If the expected instruction pattern (a `call` followed by `lea`)
-                      is not found in the disassembled routine.
+        RuntimeError: If the expected instruction pattern (a `call` followed by `lea`) is not found.
     """
     print(Fore.GREEN + "\n  Locating time initializer function...")
     instructions = disassemble_function(address_time_init, binary, code_section)
@@ -226,25 +232,28 @@ def locate_time_initializer(address_time_init, binary, code_section):
 
 def extract_critical_section_address(addr_time_init_func: int, addr_initialize_crit: int, binary, code_section) -> int:
     """
-    Extracts the address of the global CRITICAL_SECTION structure used in Fog.dll's time cache.
+    Identifies the global CRITICAL_SECTION structure used by Fog.dll's time system by analyzing its time initialization
+    function.
 
-    Looks for the instruction pattern:
-        push <imm>
-        call [InitializeCriticalSection]
+    The pattern it matches corresponds to static initialization of a CRITICAL_SECTION structure:
+        push <imm>                       # push address of static CRITICAL_SECTION
+        call [InitializeCriticalSection] # call to IAT thunk
 
-    This pattern initializes a static CRITICAL_SECTION object.
+    The function disassembles the internal time initialization routine and searches for a `push` followed immediately by
+    a `call` instruction. If the call target resolves to the IAT address of InitializeCriticalSection, the pushed value
+    is returned as the CRITICAL_SECTION's address.
 
     Args:
-        addr_time_init_func (int): VA of the time initialization function.
-        addr_initialize_crit (int): IAT VA of InitializeCriticalSection.
-        binary (lief.PE.Binary): Parsed PE binary.
-        code_section (lief.PE.Section): .text section of the binary.
+        addr_time_init_func (int): Virtual address of the internal time initialization function.
+        addr_initialize_crit (int): IAT address of InitializeCriticalSection.
+        binary (lief.PE.Binary): The parsed PE binary object.
+        code_section (lief.PE.Section): The `.text` (code) section from the binary.
 
     Returns:
-        int: The global address passed to InitializeCriticalSection.
+        int: Virtual address of the global CRITICAL_SECTION structure.
 
     Raises:
-        RuntimeError: If the instruction pattern is not found.
+        RuntimeError: If the expected instruction pattern is not found.
     """
     instructions = disassemble_function(addr_time_init_func, binary, code_section)
 
@@ -265,31 +274,40 @@ def extract_critical_section_address(addr_time_init_func: int, addr_initialize_c
 
 def extract_time_cache_addresses(address_time_main, address_get_tick, binary, code_section):
     """
-    Scans disassembled code to identify critical addresses related to Fog.dll's internal time caching logic.
+    Identifies addresses related to Fog.dll's time caching mechanism by analyzing its exported
+    time retrieval function.
 
-    Given:
-    - The virtual address of the exported main time function (e.g., ordinal 10036/10055), and
-    - The IAT address of `GetTickCount`,
+    The exported ordinal (e.g., 10036/10055) refers to a wrapper function that:
+      1. Calls the internal time calculation function.
+      2. Retrieves and caches the system tick count from GetTickCount.
+      3. Stores both values to global memory.
 
-    This function performs the following steps:
-    1. Identifies the internal time calculation function invoked by the exported function.
-    2. Identifies the global memory address where the result of the time calculation is stored.
-    3. Computes the address of the cached last tick count value (time_value + 0x4).
+    This routine matches two instruction patterns:
+    - Pattern 1: Identifies the internal function used to calculate time.
+        push 0                  # dummy/default parameter
+        call <imm>              # call internal time calculation routine
+
+    - Pattern 2: Identifies the global cached time value and tick count.
+        mov eax, [GetTickCount] # read from IAT
+        ...
+        mov [addr], eax         # store to global variable (cached time)
+        ...
+        addr_cached_tick = addr_cached_time + 0x4
 
     Args:
-        address_time_main (int): The virtual address of the main time retrieval function.
-        address_get_tick (int): The IAT address of `GetTickCount`.
-        binary (lief.PE.Binary): The parsed LIEF PE binary object for Fog.dll.
+        address_time_main (int): Virtual address of the exported time function.
+        address_get_tick (int): IAT address of GetTickCount.
+        binary (lief.PE.Binary): The parsed PE binary object.
         code_section (lief.PE.Section): The `.text` section containing executable code.
 
     Returns:
         tuple[int, int, int]: A tuple containing:
-            - The address of the internal time calculation function.
-            - The address of the global cached time value.
-            - The address of the cached last tick count value.
+            - Address of the internal time function.
+            - Address of the global cached time value.
+            - Address of the global cached tick count (offset +0x4).
 
     Raises:
-        RuntimeError: If expected instruction patterns are not found in the disassembly.
+        RuntimeError: If expected instruction patterns are not found.
     """
     print(Fore.GREEN + "\n  Extracting time cache-related addresses...")
     instructions = disassemble_function(address_time_main, binary, code_section)
@@ -476,7 +494,7 @@ def patch_fog_dll(file_path):
 
         # Assembly for the main time retrieval function. This code replaces the logic at ordinal 10036/10055). It
         # reintroduces critical section protection and the older time calculation method.
-        # '.byte` directives are used for specific opcodes that Keystone encodes differently to ensure byte-for-byte
+        # `.byte` directives are used for specific opcodes that Keystone encodes differently to ensure byte-for-byte
         # compatibility with the originals.
         asm_main = f"""
             push esi                                        # Save ESI register
@@ -558,10 +576,10 @@ def patch_fog_dll(file_path):
         print_aligned_message("Result", "Patching failed.", Fore.RED, Style.BRIGHT + Fore.WHITE, 30)
         return False
 
+
 # --------------------------------------------------------------------------
 # Main Execution
 # --------------------------------------------------------------------------
-
 
 if __name__ == "__main__":
     target_file = "Fog.dll"
