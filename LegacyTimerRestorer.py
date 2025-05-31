@@ -56,50 +56,57 @@ def print_aligned_message(label, value, label_color, value_color, align_width, i
           f"{value_color}{value}{Style.RESET_ALL}")
 
 
-def resolve_symbol(binary, base, symbol):
+def resolve_imported_symbol(binary: lief.PE.Binary, symbol_name: str) -> int:
     """
-    Resolves an imported function (by name) or exported function (by ordinal) to its virtual address (VA).
-
-    This function supports:
-    - Imported functions: Matches the given name against the binary's import address table (IAT).
-    - Exported functions: Matches the given ordinal against the export table.
+    Resolves the virtual address (VA) of an imported function by name.
 
     Args:
         binary (lief.PE.Binary): The LIEF PE binary object under analysis.
-        base (int): The image base address of the binary in memory.
-        export_table (lief.PE.Export): The export table of the binary.
-        symbol (str | int): A string (import function name) or an integer (export ordinal).
+        symbol_name (str): The name of the imported function to resolve.
 
     Returns:
-        int: The resolved virtual address (VA) of the symbol.
+        int: The resolved virtual address (VA) of the imported function.
 
     Raises:
-        RuntimeError: If an ordinal is not found in the export table.
-        TypeError: If `symbol` is neither a string nor an integer.
+        RuntimeError: If the function name is not found in the import table.
     """
-    print_aligned_message("Resolving symbol", str(
-        symbol), Fore.CYAN, Style.BRIGHT + Fore.WHITE, 30)
+    base = binary.optional_header.imagebase
+    print_aligned_message("Resolving imported symbol", symbol_name, Fore.CYAN, Style.BRIGHT + Fore.WHITE, 30)
 
-    if isinstance(symbol, str):
-        # Iterate through import entries to find the function by name
-        for entry in binary.imports:
-            for function in entry.entries:
-                if function.name and function.name.lower() == symbol.lower():
-                    # For imports, return the address from the Import Address Table (IAT)
-                    return base + function.iat_address
-    elif isinstance(symbol, int):
-        export_table = binary.get_export()  # Get the export directory
-        # Calculate the index in the export table based on the ordinal base
-        ordinal_base = export_table.ordinal_base
-        ordinal_index = symbol - ordinal_base
-        if ordinal_index < 0 or ordinal_index >= len(export_table.entries):
-            raise RuntimeError(f"Ordinal {symbol} not found in export table.")
-        # For exports, the address is an RVA (Relative Virtual Address),
-        # so add the image base to get the VA.
-        rva = export_table.entries[ordinal_index].address
-        return base + rva
-    else:
-        raise TypeError("Symbol must be a string (import name) or an integer (ordinal).")
+    for entry in binary.imports:
+        for function in entry.entries:
+            if function.name and function.name.lower() == symbol_name.lower():
+                return base + function.iat_address
+
+    raise RuntimeError(f"Imported symbol '{symbol_name}' not found.")
+
+
+def resolve_exported_symbol(binary: lief.PE.Binary, ordinal: int) -> int:
+    """
+    Resolves the virtual address (VA) of an exported function by ordinal.
+
+    Args:
+        binary (lief.PE.Binary): The LIEF PE binary object under analysis.
+        ordinal (int): The export ordinal to resolve.
+
+    Returns:
+        int: The resolved virtual address (VA) of the exported function.
+
+    Raises:
+        RuntimeError: If the ordinal is not found in the export table.
+    """
+    base = binary.optional_header.imagebase
+    print_aligned_message("Resolving exported symbol", str(ordinal), Fore.CYAN, Style.BRIGHT + Fore.WHITE, 30)
+
+    export_table = binary.get_export()
+    ordinal_base = export_table.ordinal_base
+    ordinal_index = ordinal - ordinal_base
+
+    if ordinal_index < 0 or ordinal_index >= len(export_table.entries):
+        raise RuntimeError(f"Ordinal {ordinal} not found in export table.")
+
+    rva = export_table.entries[ordinal_index].address
+    return base + rva
 
 
 def disassemble_function(virtual_address, binary, base, code_section):
@@ -393,18 +400,18 @@ def patch_fog_dll(file_path):
         # Exported functions from Fog.dll (resolved by ordinal; varies by D2 version)
         if timestamp < VERSION_107_TIMESTAMP or timestamp == VERSION_106B_TIMESTAMP:
             # Versions 1.06 and 1.06b use these ordinals
-            addr_time_init_ord = resolve_symbol(binary, base, 10017)  # Time initialization routine
-            addr_time_calc_ord = resolve_symbol(binary, base, 10036)  # Main time retrieval routine
+            addr_time_init_ord = resolve_exported_symbol(binary, 10017)  # Time initialization routine
+            addr_time_calc_ord = resolve_exported_symbol(binary, 10036)  # Main time retrieval routine
         else:
             # Versions 1.07 and higher use these ordinals
-            addr_time_init_ord = resolve_symbol(binary, base, 10019)  # Time initialization routine
-            addr_time_calc_ord = resolve_symbol(binary, base, 10055)  # Main time retrieval routine
+            addr_time_init_ord = resolve_exported_symbol(binary, 10019)  # Time initialization routine
+            addr_time_calc_ord = resolve_exported_symbol(binary, 10055)  # Main time retrieval routine
 
         # Imported Windows API functions (resolved by name from the export table or IAT)
-        addr_init_crit_func = resolve_symbol(binary, base, "InitializeCriticalSection")
-        addr_get_tick_func = resolve_symbol(binary, base, "GetTickCount")
-        addr_enter_crit_func = resolve_symbol(binary, base, "EnterCriticalSection")
-        addr_leave_crit_func = resolve_symbol(binary, base, "LeaveCriticalSection")
+        addr_init_crit_func = resolve_imported_symbol(binary, "InitializeCriticalSection")
+        addr_get_tick_func = resolve_imported_symbol(binary, "GetTickCount")
+        addr_enter_crit_func = resolve_imported_symbol(binary, "EnterCriticalSection")
+        addr_leave_crit_func = resolve_imported_symbol(binary, "LeaveCriticalSection")
 
         # Address extraction - locate time logic and global state.
         addr_time_init_func = locate_time_initializer(addr_time_init_ord, binary, base, code_section)
