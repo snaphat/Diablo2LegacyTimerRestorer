@@ -109,7 +109,7 @@ def resolve_exported_symbol(binary: lief.PE.Binary, ordinal: int) -> int:
     return base + rva
 
 
-def disassemble_function(virtual_address, binary, base, code_section):
+def disassemble_function(virtual_address, binary, code_section):
     """
     Disassembles a sequence of bytes from the specified code section using Capstone, starting at the given virtual
     address.
@@ -117,7 +117,6 @@ def disassemble_function(virtual_address, binary, base, code_section):
     Args:
         virtual_address (int): The virtual address (VA) where disassembly should begin.
         binary (lief.PE.Binary): The LIEF PE binary object.
-        base (int): The image base address of the binary in memory.
         code_section (lief.PE.Section): The `.text` (code) section from which to read bytes.
 
     Returns:
@@ -128,6 +127,7 @@ def disassemble_function(virtual_address, binary, base, code_section):
         ValueError: If the provided `virtual_address` falls outside the boundaries
         of the specified code section.
     """
+    base = binary.optional_header.imagebase
     print_aligned_message("Disassembling function at",
                           f"0x{virtual_address:08X}", Fore.MAGENTA, Style.BRIGHT + Fore.WHITE, 30)
 
@@ -147,7 +147,7 @@ def disassemble_function(virtual_address, binary, base, code_section):
     return list(disassembler.disasm(function_bytes, virtual_address))
 
 
-def apply_patch(virtual_address, asm_source, assembler, binary, base, code_section):
+def apply_patch(virtual_address, asm_source, assembler, binary, code_section):
     """
     Assembles the provided x86 assembly source code into machine bytes using Keystone, and then injects these bytes into
     the target binary's `.text` section at the specified virtual address.
@@ -162,13 +162,13 @@ def apply_patch(virtual_address, asm_source, assembler, binary, base, code_secti
                           code to be assembled.
         assembler (keystone.Ks): An initialized Keystone assembler instance.
         binary (lief.PE.Binary): The LIEF binary object to be patched.
-        base (int): The image base address of the binary.
         code_section (lief.PE.Section): The `.text` (code) section of the binary.
 
     Raises:
         ValueError: If the assembled patch would extend beyond the boundaries
                     of the `code_section`.
     """
+    base = binary.optional_header.imagebase
     print_aligned_message(
         "Applying patch at", f"0x{virtual_address:08X}", Fore.YELLOW, Style.BRIGHT + Fore.WHITE, 30)
     # Assemble the provided assembly source into machine code bytes
@@ -191,7 +191,7 @@ def apply_patch(virtual_address, asm_source, assembler, binary, base, code_secti
     code_section.content = updated_content  # Assign the modified content back
 
 
-def locate_time_initializer(address_time_init, binary, base, code_section):
+def locate_time_initializer(address_time_init, binary, code_section):
     """
     Identifies the internal implementation of the time initializer routine exported by Fog.dll.
 
@@ -202,7 +202,6 @@ def locate_time_initializer(address_time_init, binary, base, code_section):
     Args:
         address_time_init (int): The virtual address of the exported time initializer routine.
         binary (lief.PE.Binary): The parsed LIEF PE binary object.
-        base (int): The image base address of the binary.
         code_section (lief.PE.Section): The `.text` (code) section from the binary.
 
     Returns:
@@ -213,18 +212,19 @@ def locate_time_initializer(address_time_init, binary, base, code_section):
                       is not found in the disassembled routine.
     """
     print(Fore.GREEN + "\n  Locating time initializer function...")
-    instructions = disassemble_function(
-        address_time_init, binary, base, code_section)
+    instructions = disassemble_function(address_time_init, binary, code_section)
+
     for idx, instr in enumerate(instructions):
         if instr.mnemonic == "lea":
             if idx > 0:
                 previous_instr = instructions[idx - 1]
                 if previous_instr.mnemonic == "call":
                     return previous_instr.operands[0].value.imm
+
     raise RuntimeError("Could not locate time initializer function pattern.")
 
 
-def extract_time_cache_addresses(address_time_main, address_get_tick, binary, base, code_section):
+def extract_time_cache_addresses(address_time_main, address_get_tick, binary, code_section):
     """
     Scans disassembled code to identify critical addresses related to Fog.dll's internal time caching logic.
 
@@ -242,7 +242,6 @@ def extract_time_cache_addresses(address_time_main, address_get_tick, binary, ba
         address_time_main (int): The virtual address of the main time retrieval function.
         address_get_tick (int): The IAT address of `GetTickCount`.
         binary (lief.PE.Binary): The parsed LIEF PE binary object for Fog.dll.
-        base (int): The image base address of the binary in memory.
         code_section (lief.PE.Section): The `.text` section containing executable code.
 
     Returns:
@@ -256,7 +255,7 @@ def extract_time_cache_addresses(address_time_main, address_get_tick, binary, ba
         RuntimeError: If expected instruction patterns are not found in the disassembly.
     """
     print(Fore.GREEN + "\n  Extracting time cache-related addresses...")
-    instructions = disassemble_function(address_time_main, binary, base, code_section)
+    instructions = disassemble_function(address_time_main, binary, code_section)
     addr_internal_time_func = None  # Address of the internal time function that calls GetLocalTime and GetSystemTime
     addr_cached_time_value = None
     addr_crit_section_struct = None
@@ -315,9 +314,6 @@ def patch_fog_dll(file_path):
         binary = lief.parse(file_path)
         if binary is None:
             raise RuntimeError("Failed to parse the binary. Please ensure it's a valid PE file.")
-
-        # Base address where the DLL prefers to be loaded
-        base = binary.optional_header.imagebase
 
     # Version detection - determine the game version from the PE timestamp.
         timestamp = binary.header.time_date_stamps
@@ -414,9 +410,9 @@ def patch_fog_dll(file_path):
         addr_leave_crit_func = resolve_imported_symbol(binary, "LeaveCriticalSection")
 
         # Address extraction - locate time logic and global state.
-        addr_time_init_func = locate_time_initializer(addr_time_init_ord, binary, base, code_section)
+        addr_time_init_func = locate_time_initializer(addr_time_init_ord, binary, code_section)
         addr_internal_time_func, addr_cached_time_value, addr_crit_section_struct, addr_cached_tick_count = \
-            extract_time_cache_addresses(addr_time_calc_ord, addr_get_tick_func, binary, base, code_section)
+            extract_time_cache_addresses(addr_time_calc_ord, addr_get_tick_func, binary, code_section)
 
         # Display all resolved addresses for verification and debugging purposes
         symbol_map = {
@@ -497,8 +493,8 @@ def patch_fog_dll(file_path):
         # Initialize the Keystone assembler for generating machine code from assembly
         assembler = Ks(KS_ARCH_X86, KS_MODE_32)
 
-        apply_patch(addr_time_init_func, asm_init, assembler, binary, base, code_section)
-        apply_patch(addr_time_calc_ord, asm_main, assembler, binary, base, code_section)
+        apply_patch(addr_time_init_func, asm_init, assembler, binary, code_section)
+        apply_patch(addr_time_calc_ord, asm_main, assembler, binary, code_section)
 
         # File saving - write the modified binary back to disk.
         print()
