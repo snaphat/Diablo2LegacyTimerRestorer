@@ -469,6 +469,9 @@ def patch_fog_dll(file_path):
         if addr_cache_region:
             addr_cached_time_value = addr_cache_region
             addr_cached_tick_count = addr_cache_region + 0x4
+        else:
+            addr_cached_time_value = 0
+            addr_cached_tick_count = 0
 
         # Display all resolved addresses for verification and debugging purposes
         symbol_map = {
