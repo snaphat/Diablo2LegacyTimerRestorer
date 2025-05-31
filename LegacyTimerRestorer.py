@@ -10,6 +10,10 @@ import shutil
 # Initialize Colorama for colored CLI output
 init(autoreset=True)
 
+# --------------------------------------------------------------------------
+# Utility Functions
+# --------------------------------------------------------------------------
+
 
 def print_aligned_message(label, value, label_color, value_color, align_width, indent=4):
     """
@@ -194,6 +198,36 @@ def locate_time_initializer(address_time_init, binary, base, code_section):
 
 
 def extract_time_cache_addresses(address_time_main, address_get_tick, binary, base, code_section):
+    """
+    Scans disassembled code to identify critical addresses related to Fog.dll's internal time caching logic.
+
+    Given:
+    - The virtual address of the exported main time function (e.g., ordinal 10036/10055), and
+    - The IAT address of `GetTickCount`,
+
+    This function performs the following steps:
+    1. Identifies the internal time calculation function invoked by the exported function.
+    2. Identifies the global memory address where the result of the time calculation is stored.
+    3. Computes the addresses of the associated critical section structure (time_value - 0x18).
+    4. Computes the address of the cached last tick count value (time_value + 0x4).
+
+    Args:
+        address_time_main (int): The virtual address of the main time retrieval function.
+        address_get_tick (int): The IAT address of `GetTickCount`.
+        binary (lief.PE.Binary): The parsed LIEF PE binary object for Fog.dll.
+        base (int): The image base address of the binary in memory.
+        code_section (lief.PE.Section): The `.text` section containing executable code.
+
+    Returns:
+        tuple[int, int, int, int]: A tuple containing:
+            - The address of the internal time calculation function.
+            - The address of the global cached time value.
+            - The address of the global critical section structure.
+            - The address of the cached last tick count value.
+
+    Raises:
+        RuntimeError: If expected instruction patterns are not found in the disassembly.
+    """
     print(Fore.GREEN + "\n  Extracting time cache-related addresses...")
     instructions = disassemble_function(address_time_main, binary, base, code_section)
     addr_internal_time_func = None  # Address of the internal time function that calls GetLocalTime and GetSystemTime
@@ -215,7 +249,7 @@ def extract_time_cache_addresses(address_time_main, address_get_tick, binary, ba
         # pointing to the GetTickCount IAT entry, and a subsequent `mov` to an immediate.
         # This often indicates the location where the cached tick count or time value is set.
         if addr_cached_time_value is None and instr.mnemonic == "mov" and instr.operands and len(instr.operands) > 1 \
-            and instr.operands[1].type == X86_OP_MEM and instr.operands[1].mem.disp == address_get_tick:
+                and instr.operands[1].type == X86_OP_MEM and instr.operands[1].mem.disp == address_get_tick:
             if idx + 2 < len(instructions):
                 next_instr = instructions[idx + 2]
                 if next_instr.mnemonic == "mov" and next_instr.operands and len(
@@ -461,6 +495,10 @@ def patch_fog_dll(file_path):
                 Fore.RED, Style.BRIGHT + Fore.WHITE, 30)
         print_aligned_message("Result", "Patching failed.", Fore.RED, Style.BRIGHT + Fore.WHITE, 30)
         return False
+
+# --------------------------------------------------------------------------
+# Main Execution
+# --------------------------------------------------------------------------
 
 
 if __name__ == "__main__":
