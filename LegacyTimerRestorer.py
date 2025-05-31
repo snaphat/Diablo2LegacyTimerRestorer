@@ -7,9 +7,25 @@ from colorama import init, Fore, Style
 import os
 import shutil
 
+# Initialize Colorama for colored CLI output
 init(autoreset=True)
 
+
 def print_aligned_message(label, value, label_color, value_color, align_width, indent=4):
+    """
+    Prints a colorized and aligned message with a label and its corresponding value.
+
+    Args:
+        label (str): The descriptive label text.
+        value (str): The value associated with the label.
+        label_color (colorama.Fore): The color for the label text.
+        value_color (colorama.Fore): The color for the value text.
+        align_width (int): The width allocated for aligning the label text.
+        indent (int, optional): The number of spaces to indent the entire line. Defaults to 4.
+
+    Returns:
+        None
+    """
     indent_str = " " * indent
     formatted_label = f"{label:<{align_width}}"
     print(f"{indent_str}{label_color}{formatted_label}{Style.RESET_ALL}: " +
@@ -21,16 +37,20 @@ def resolve_symbol(binary, base, symbol):
         symbol), Fore.CYAN, Style.BRIGHT + Fore.WHITE, 30)
 
     if isinstance(symbol, str):
+        # Iterate through import entries to find the function by name
         for entry in binary.imports:
             for function in entry.entries:
                 if function.name and function.name.lower() == symbol.lower():
+                    # For imports, return the address from the Import Address Table (IAT)
                     return base + function.iat_address
     elif isinstance(symbol, int):
-        export_table = binary.get_export()
+        export_table = binary.get_export()  # Get the export directory
+        # Calculate the index in the export table based on the ordinal base
         ordinal_base = export_table.ordinal_base
         ordinal_index = symbol - ordinal_base
         if ordinal_index < 0 or ordinal_index >= len(export_table.entries):
             raise RuntimeError(f"Ordinal {symbol} not found in export table.")
+        # For exports, the address is an RVA (Relative Virtual Address), so add the image base to get the VA
         rva = export_table.entries[ordinal_index].address
         return base + rva
     else:
@@ -43,13 +63,16 @@ def disassemble_function(virtual_address, binary, base, code_section):
 
     section_bytes = bytes(code_section.content)
     section_rva = code_section.virtual_address
+    # Calculate the offset within the section's raw content bytes
     offset = virtual_address - base - section_rva
     if offset < 0 or offset >= len(section_bytes):
         raise ValueError(
             f"Virtual address 0x{virtual_address:08X} is outside the code section boundaries.")
 
+    # Disassemble from the calculated offset to the end of the section
     function_bytes = section_bytes[offset:]
     disassembler = Cs(CS_ARCH_X86, CS_MODE_32)
+    # Enable detailed instruction information (operands, groups) for better analysis
     disassembler.detail = True
     return list(disassembler.disasm(function_bytes, virtual_address))
 
@@ -57,21 +80,24 @@ def disassemble_function(virtual_address, binary, base, code_section):
 def apply_patch(virtual_address, asm_source, assembler, binary, base, code_section):
     print_aligned_message(
         "Applying patch at", f"0x{virtual_address:08X}", Fore.YELLOW, Style.BRIGHT + Fore.WHITE, 30)
+    # Assemble the provided assembly source into machine code bytes
     patch_bytes = assembler.asm(asm_source, virtual_address)[0]
 
     print_aligned_message(
         "Patch size", f"{len(patch_bytes)} bytes", Fore.YELLOW, Style.BRIGHT + Fore.WHITE, 30)
 
+    # Calculate the offset within the code section's content array
     offset = virtual_address - base - code_section.virtual_address
 
+    # Perform bounds checking to ensure the patch fits within the section
     if offset < 0 or offset + len(patch_bytes) > len(code_section.content):
         raise ValueError(
             f"Patch at 0x{virtual_address:08X} (size {len(patch_bytes)} bytes) goes out of bounds of the code section.")
 
-
+    # Update the content of the LIEF section object
     updated_content = list(code_section.content)
     updated_content[offset:offset + len(patch_bytes)] = patch_bytes
-    code_section.content = updated_content
+    code_section.content = updated_content  # Assign the modified content back
 
 
 def locate_time_initializer(address_time_init, binary, base, code_section):
@@ -90,24 +116,30 @@ def locate_time_initializer(address_time_init, binary, base, code_section):
 def extract_time_cache_addresses(address_time_main, address_get_tick, binary, base, code_section):
     print(Fore.GREEN + "\n  Extracting time cache-related addresses...")
     instructions = disassemble_function(address_time_main, binary, base, code_section)
-    addr_internal_time_func = None
+    addr_internal_time_func = None  # Address of the internal time function that calls GetLocalTime and GetSystemTime
     addr_cached_time_value = None
     addr_crit_section_struct = None
     addr_cached_tick_count = None
 
-
     for idx, instr in enumerate(instructions):
+        # Pattern 1: Identify internal function address via `call` instruction
+        # Look for a `push 0` followed by a `call` (common for __stdcall/__cdecl)
         if addr_internal_time_func is None and instr.mnemonic == "push" and instr.op_str == "0":
             if idx + 1 < len(instructions):
                 next_instr = instructions[idx + 1]
                 if next_instr.mnemonic == "call":
                     addr_internal_time_func = next_instr.operands[0].value.imm
 
-        if addr_cached_time_value is None and instr.mnemonic == "mov" and instr.operands and len(instr.operands) > 1 and instr.operands[1].type == X86_OP_MEM and instr.operands[1].mem.disp == address_get_tick:
+        # Pattern 2: Identify cached time value via IAT reference to GetTickCount
+        # Look for a `mov` instruction where the source operand is a memory address
+        # pointing to the GetTickCount IAT entry, and a subsequent `mov` to an immediate.
+        # This often indicates the location where the cached tick count or time value is set.
+        if addr_cached_time_value is None and instr.mnemonic == "mov" and instr.operands and len(instr.operands) > 1 \
+            and instr.operands[1].type == X86_OP_MEM and instr.operands[1].mem.disp == address_get_tick:
             if idx + 2 < len(instructions):
                 next_instr = instructions[idx + 2]
-                if next_instr.mnemonic == "mov" and next_instr.operands and len(next_instr.operands) > 1 and \
-                   next_instr.operands[1].type == X86_OP_IMM:
+                if next_instr.mnemonic == "mov" and next_instr.operands and len(
+                        next_instr.operands) > 1 and next_instr.operands[1].type == X86_OP_IMM:
                     addr_cached_time_value = next_instr.operands[1].value.imm
                     addr_crit_section_struct = addr_cached_time_value - 0x18
                     addr_cached_tick_count = addr_cached_time_value + 0x4
@@ -118,32 +150,38 @@ def extract_time_cache_addresses(address_time_main, address_get_tick, binary, ba
     return (
         addr_internal_time_func,
         addr_cached_time_value,
-        addr_crit_section_struct,
-        addr_cached_tick_count,
+        addr_crit_section_struct,  # Critical section struct is 0x18 bytes before the cached time value
+        addr_cached_tick_count,  # Last tick count cache is 0x4 bytes after the cached time value
     )
 
 
 def patch_fog_dll(file_path):
     print(Fore.WHITE + f"\n--- Processing: {file_path} ---")
-    backup_path = file_path + ".bak"
+    backup_path = file_path + ".bak"  # Define the path for the primary, definitive original backup
 
     try:
+        # Backup management - always patch from a clean original. If an existing backup (.bak) is found, it means a
+        # previous patch might have been applied. We restore the file from this backup to ensure we're always working on
+        # the original, unpatched version.
         if os.path.exists(backup_path):
-            print(
-Fore.YELLOW + f"  Found existing original backup at '{backup_path}'. Restoring it to '{file_path}' before patching.")
+            print(Fore.YELLOW + f"  Found backup at '{backup_path}'. Restoring it to '{file_path}' before patching.")
             shutil.copy2(backup_path, file_path)
         else:
-            shutil.copy2(file_path, backup_path)
+            shutil.copy2(file_path, backup_path)  # If no backup exists, create one from the current Fog.dll.
 
+        # Binary loading - parse the binary and locate key sections.
         print(Fore.GREEN + "  Loading binary...")
         binary = lief.parse(file_path)
         if binary is None:
             raise RuntimeError("Failed to parse the binary. Please ensure it's a valid PE file.")
 
+        # Base address where the DLL prefers to be loaded
         base = binary.optional_header.imagebase
 
+    # Version detection - determine the game version from the PE timestamp.
         timestamp = binary.header.time_date_stamps
 
+        # Define timestamps for known Diablo II Fog.dll versions. These values are derived from various D2 releases.
         VERSION_100_TIMESTAMP = 0x392ec7d4
         VERSION_101_TIMESTAMP = 0x3957d5f7
         VERSION_102_TIMESTAMP = 0x3966576f
@@ -196,45 +234,50 @@ Fore.YELLOW + f"  Found existing original backup at '{backup_path}'. Restoring i
             VERSION_113D_TIMESTAMP:      "1.13d",
         }
 
-        current_version_name = "Unknown"
-        for ts, name in sorted(version_names.items()):
-            if timestamp >= ts:
-                current_version_name = name
-            else:
-                break
+        current_version_name = version_names.get(timestamp, "Unknown")
 
         print_aligned_message("Fog.dll Version", current_version_name, Fore.BLUE, Style.BRIGHT + Fore.WHITE, 30)
         print_aligned_message("Timestamp", f"0x{timestamp:08X}", Fore.BLUE, Style.BRIGHT + Fore.WHITE, 30)
 
+        # Check if patching is necessary based on the version timestamp.
+        # Versions earlier than 1.06 already use the desired logic.
         if timestamp < VERSION_106_TIMESTAMP:
-            print_aligned_message("Info", "This Fog.dll is from a version earlier than 1.06. Patching is not necessary.",
+            print_aligned_message("Info", "Fog.dll is from a version earlier than 1.06. Patching is not necessary.",
                                   Fore.BLUE, Style.BRIGHT + Fore.WHITE, 30)
             # If no patching is needed, remove the temporary backup to clean up
             os.remove(backup_path)
             return True
 
+        # Find the .text section, which contains the executable code
         code_section = next((s for s in binary.sections if s.name == ".text"), None)
         if not code_section:
             raise RuntimeError("No .text section found in the binary. This file might be malformed.")
 
+        # Symbol resolution - resolve exports addresses.
         print(Fore.GREEN + "\n  Resolving required symbols...")
 
+        # Exported functions from Fog.dll (resolved by ordinal; varies by D2 version)
         if timestamp < VERSION_107_TIMESTAMP or timestamp == VERSION_106B_TIMESTAMP:
-            addr_time_init_ord = resolve_symbol(binary, base, 10017)
-            addr_time_calc_ord = resolve_symbol(binary, base, 10036)
+            # Versions 1.06 and 1.06b use these ordinals
+            addr_time_init_ord = resolve_symbol(binary, base, 10017)  # Time initialization routine
+            addr_time_calc_ord = resolve_symbol(binary, base, 10036)  # Main time retrieval routine
         else:
-            addr_time_init_ord = resolve_symbol(binary, base, 10019)
-            addr_time_calc_ord = resolve_symbol(binary, base, 10055)
+            # Versions 1.07 and higher use these ordinals
+            addr_time_init_ord = resolve_symbol(binary, base, 10019)  # Time initialization routine
+            addr_time_calc_ord = resolve_symbol(binary, base, 10055)  # Main time retrieval routine
 
+        # Imported Windows API functions (resolved by name from the export table or IAT)
         addr_init_crit_func = resolve_symbol(binary, base, "InitializeCriticalSection")
         addr_get_tick_func = resolve_symbol(binary, base, "GetTickCount")
         addr_enter_crit_func = resolve_symbol(binary, base, "EnterCriticalSection")
         addr_leave_crit_func = resolve_symbol(binary, base, "LeaveCriticalSection")
 
+        # Address extraction - locate time logic and global state.
         addr_time_init_func = locate_time_initializer(addr_time_init_ord, binary, base, code_section)
         addr_internal_time_func, addr_cached_time_value, addr_crit_section_struct, addr_cached_tick_count = \
             extract_time_cache_addresses(addr_time_calc_ord, addr_get_tick_func, binary, base, code_section)
 
+        # Display all resolved addresses for verification and debugging purposes
         symbol_map = {
             "InitializeCriticalSection_IAT": addr_init_crit_func,
             "GetTickCount_IAT": addr_get_tick_func,
@@ -300,13 +343,16 @@ Fore.YELLOW + f"  Found existing original backup at '{backup_path}'. Restoring i
             ret                                             # Return
         """
 
+        # Patch injection - write assembled instructions into the binary.
         print(Fore.GREEN + "\n  Patching functions...")
 
+        # Initialize the Keystone assembler for generating machine code from assembly
         assembler = Ks(KS_ARCH_X86, KS_MODE_32)
 
         apply_patch(addr_time_init_func, asm_init, assembler, binary, base, code_section)
         apply_patch(addr_time_calc_ord, asm_main, assembler, binary, base, code_section)
 
+        # File saving - write the modified binary back to disk.
         print()
         print_aligned_message("Saving patched binary to", file_path, Fore.GREEN,
                               Style.BRIGHT + Fore.WHITE, 32, indent=2)
@@ -317,11 +363,15 @@ Fore.YELLOW + f"  Found existing original backup at '{backup_path}'. Restoring i
 
     except Exception as e:
         print_aligned_message("Error", f"Patching {file_path} failed: {e}", Fore.RED, Style.BRIGHT + Fore.WHITE, 30)
+        # Roll back to the original if possible
         if os.path.exists(backup_path):
-            print_aligned_message("Action", f"Restoring original file from '{backup_path}'.", Fore.YELLOW, Style.BRIGHT + Fore.WHITE, 30)
+            print_aligned_message(
+                "Action", f"Restoring original file from '{backup_path}'.", Fore.YELLOW, Style.BRIGHT + Fore.WHITE, 30)
             shutil.copy2(backup_path, file_path)
         else:
-            print_aligned_message("Warning", "No original backup found to restore from. The file might be corrupted.", Fore.RED, Style.BRIGHT + Fore.WHITE, 30)
+            print_aligned_message(
+                "Warning", "No original backup found to restore from. The file might be corrupted.",
+                Fore.RED, Style.BRIGHT + Fore.WHITE, 30)
         print_aligned_message("Result", "Patching failed.", Fore.RED, Style.BRIGHT + Fore.WHITE, 30)
         return False
 
@@ -331,6 +381,7 @@ if __name__ == "__main__":
     print(Fore.CYAN + f"Searching for '{target_file}' in current directory and subdirectories...")
 
     found_files = []
+    # Step 1: Recursively search for all Fog.dll files
     for root, _, files in os.walk("."):
         for file in files:
             if file.lower() == target_file.lower():
@@ -338,6 +389,7 @@ if __name__ == "__main__":
 
     failed_files = []
 
+    # Step 2: Report and process discovered files
     if not found_files:
         print(Fore.YELLOW + f"No '{target_file}' found in the current directory or its subdirectories.")
     else:
@@ -346,6 +398,7 @@ if __name__ == "__main__":
             if not patch_fog_dll(f_path):
                 failed_files.append(f_path)
 
+    # Step 3: Final summary
     print(Fore.WHITE + "\n--- Patching Summary ---")
     if failed_files:
         print(Fore.RED + "The following files failed to patch:")
