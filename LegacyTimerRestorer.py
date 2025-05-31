@@ -33,6 +33,26 @@ def print_aligned_message(label, value, label_color, value_color, align_width, i
 
 
 def resolve_symbol(binary, base, symbol):
+    """
+    Resolves an imported function (by name) or exported function (by ordinal) to its virtual address (VA).
+
+    This function supports:
+    - Imported functions: Matches the given name against the binary's import address table (IAT).
+    - Exported functions: Matches the given ordinal against the export table.
+
+    Args:
+        binary (lief.PE.Binary): The LIEF PE binary object under analysis.
+        base (int): The image base address of the binary in memory.
+        export_table (lief.PE.Export): The export table of the binary.
+        symbol (str | int): A string (import function name) or an integer (export ordinal).
+
+    Returns:
+        int: The resolved virtual address (VA) of the symbol.
+
+    Raises:
+        RuntimeError: If an ordinal is not found in the export table.
+        TypeError: If `symbol` is neither a string nor an integer.
+    """
     print_aligned_message("Resolving symbol", str(
         symbol), Fore.CYAN, Style.BRIGHT + Fore.WHITE, 30)
 
@@ -50,7 +70,8 @@ def resolve_symbol(binary, base, symbol):
         ordinal_index = symbol - ordinal_base
         if ordinal_index < 0 or ordinal_index >= len(export_table.entries):
             raise RuntimeError(f"Ordinal {symbol} not found in export table.")
-        # For exports, the address is an RVA (Relative Virtual Address), so add the image base to get the VA
+        # For exports, the address is an RVA (Relative Virtual Address),
+        # so add the image base to get the VA.
         rva = export_table.entries[ordinal_index].address
         return base + rva
     else:
@@ -58,6 +79,24 @@ def resolve_symbol(binary, base, symbol):
 
 
 def disassemble_function(virtual_address, binary, base, code_section):
+    """
+    Disassembles a sequence of bytes from the specified code section using Capstone, starting at the given virtual
+    address.
+
+    Args:
+        virtual_address (int): The virtual address (VA) where disassembly should begin.
+        binary (lief.PE.Binary): The LIEF PE binary object.
+        base (int): The image base address of the binary in memory.
+        code_section (lief.PE.Section): The `.text` (code) section from which to read bytes.
+
+    Returns:
+        list[capstone.CsInsn]: A list of Capstone instruction objects representing
+        the disassembled function code.
+
+    Raises:
+        ValueError: If the provided `virtual_address` falls outside the boundaries
+        of the specified code section.
+    """
     print_aligned_message("Disassembling function at",
                           f"0x{virtual_address:08X}", Fore.MAGENTA, Style.BRIGHT + Fore.WHITE, 30)
 
@@ -78,6 +117,27 @@ def disassemble_function(virtual_address, binary, base, code_section):
 
 
 def apply_patch(virtual_address, asm_source, assembler, binary, base, code_section):
+    """
+    Assembles the provided x86 assembly source code into machine bytes using Keystone, and then injects these bytes into
+    the target binary's `.text` section at the specified virtual address.
+
+    This function is central to modifying the binary, replacing existing code with the restored pre-1.06 time caching
+    logic.
+
+    Args:
+        virtual_address (int): The virtual address (VA) where the patch bytes
+                               should be written.
+        asm_source (str): A multi-line string containing the x86 assembly
+                          code to be assembled.
+        assembler (keystone.Ks): An initialized Keystone assembler instance.
+        binary (lief.PE.Binary): The LIEF binary object to be patched.
+        base (int): The image base address of the binary.
+        code_section (lief.PE.Section): The `.text` (code) section of the binary.
+
+    Raises:
+        ValueError: If the assembled patch would extend beyond the boundaries
+                    of the `code_section`.
+    """
     print_aligned_message(
         "Applying patch at", f"0x{virtual_address:08X}", Fore.YELLOW, Style.BRIGHT + Fore.WHITE, 30)
     # Assemble the provided assembly source into machine code bytes
@@ -101,6 +161,26 @@ def apply_patch(virtual_address, asm_source, assembler, binary, base, code_secti
 
 
 def locate_time_initializer(address_time_init, binary, base, code_section):
+    """
+    Identifies the internal implementation of the time initializer routine exported by Fog.dll.
+
+    The exported ordinals (e.g., 10017 or 10019) point directly to a routine that includes a `call` to the actual
+    internal time initialization function. This function disassembles that routine and extracts the target address by
+    identifying a `call` followed by a `lea` instruction, which commonly precedes setup logic using the return value.
+
+    Args:
+        address_time_init (int): The virtual address of the exported time initializer routine.
+        binary (lief.PE.Binary): The parsed LIEF PE binary object.
+        base (int): The image base address of the binary.
+        code_section (lief.PE.Section): The `.text` (code) section from the binary.
+
+    Returns:
+        int: The virtual address (VA) of the internal time initialization function.
+
+    Raises:
+        RuntimeError: If the expected instruction pattern (a `call` followed by `lea`)
+                      is not found in the disassembled routine.
+    """
     print(Fore.GREEN + "\n  Locating time initializer function...")
     instructions = disassemble_function(
         address_time_init, binary, base, code_section)
@@ -298,6 +378,10 @@ def patch_fog_dll(file_path):
                 raise ValueError(f"  {name} is zero or undefined. Cannot proceed without this address.")
             print_aligned_message(name, f"0x{addr:08X}", Fore.BLUE, Style.BRIGHT + Fore.WHITE, 30)
 
+        # Assembly for the main time retrieval function. This code replaces the logic at ordinal 10036/10055). It
+        # reintroduces critical section protection and the older time calculation method.
+        # '.byte` directives are used for specific opcodes that Keystone encodes differently to ensure byte-for-byte
+        # compatibility with the originals.
         asm_main = f"""
             push esi                                        # Save ESI register
             call dword ptr [{addr_get_tick_func}]           # Call GetTickCount to get current tick
@@ -331,6 +415,9 @@ def patch_fog_dll(file_path):
             ret                                             # Return with calculated time in EAX
         """
 
+        # Assembly for the time initialization function. This code replaces the logic at a sub-function called in
+        # ordinal 10017/10019). It initializes the critical section and sets the initial cached time and tick count
+        # values.
         asm_init = f"""
             push {addr_crit_section_struct}                 # Push address of Critical Section structure
             call dword ptr [{addr_init_crit_func}]          # InitializeCriticalSection
