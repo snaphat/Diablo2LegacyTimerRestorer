@@ -272,75 +272,70 @@ def extract_critical_section_address(addr_time_init_func: int, addr_initialize_c
     raise RuntimeError("Failed to locate critical section address near call to InitializeCriticalSection.")
 
 
-def extract_time_cache_addresses(address_time_main, address_get_tick, binary, code_section):
+def extract_internal_time_function_and_cache_address(address_time_wrapper, address_get_tickcount_iat, binary, code_section):
     """
-    Identifies addresses related to Fog.dll's time caching mechanism by analyzing its exported
-    time retrieval function.
+    Identifies addresses related to Fog.dll's internal time computation and its shared atomic memory region by analyzing
+    the exported time wrapper function.
 
-    The exported ordinal (e.g., 10036/10055) refers to a wrapper function that:
-      1. Calls the internal time calculation function.
-      2. Retrieves and caches the system tick count from GetTickCount.
-      3. Stores both values to global memory.
+    The exported ordinal (e.g., 10036/10055) refers to a wrapper that:
+      1. Calls the internal time calculation function with a dummy parameter.
+      2. Retrieves the system tick count via GetTickCount.
+      3. Stores both values to a shared 8-byte global memory region, typically via an atomic update sequence.
 
     This routine matches two instruction patterns:
     - Pattern 1: Identifies the internal function used to calculate time.
         push 0                  # dummy/default parameter
         call <imm>              # call internal time calculation routine
 
-    - Pattern 2: Identifies the global cached time value and tick count.
-        mov eax, [GetTickCount] # read from IAT
+    - Pattern 2: Identifies the base address of the 8-byte global memory region.
+        mov eax, [GetTickCount] # load from IAT
         ...
-        mov [addr], eax         # store to global variable (cached time)
+        mov [addr], eax         # store tick count or time value to global region
         ...
-        addr_cached_tick = addr_cached_time + 0x4
+        # The region is assumed to hold:
+        #   [0x0] = time result (DWORD)
+        #   [0x4] = tick count (DWORD)
 
     Args:
-        address_time_main (int): Virtual address of the exported time function.
-        address_get_tick (int): IAT address of GetTickCount.
+        address_time_wrapper (int): Virtual address of the exported time wrapper function.
+        address_get_tickcount_iat (int): IAT address of GetTickCount.
         binary (lief.PE.Binary): The parsed PE binary object.
         code_section (lief.PE.Section): The `.text` section containing executable code.
 
     Returns:
-        tuple[int, int, int]: A tuple containing:
-            - Address of the internal time function.
-            - Address of the global cached time value.
-            - Address of the global cached tick count (offset +0x4).
+        tuple[int, int]: A tuple containing:
+            - Address of the internal time calculation function.
+            - Base address of the 8-byte global memory region used to store time and tick count.
 
     Raises:
         RuntimeError: If expected instruction patterns are not found.
     """
-    print(Fore.GREEN + "\n  Extracting time cache-related addresses...")
-    instructions = disassemble_function(address_time_main, binary, code_section)
+    print(Fore.GREEN + "\n  Extracting internal time function and cache address...")
+    instructions = disassemble_function(address_time_wrapper, binary, code_section)
     addr_internal_time_func = None
-    addr_cached_time_value = None
-    addr_cached_tick_count = None
+    addr_cache_region = None
 
     for idx, instr in enumerate(instructions):
-        # Pattern 1: Identify internal function address via `call` instruction
+        # Look for `push 0` followed by `call <imm>` to locate the internal function
         if addr_internal_time_func is None and instr.mnemonic == "push" and instr.op_str == "0":
             if idx + 1 < len(instructions):
                 next_instr = instructions[idx + 1]
                 if next_instr.mnemonic == "call":
                     addr_internal_time_func = next_instr.operands[0].value.imm
 
-        # Pattern 2: Identify cached time value via IAT reference to GetTickCount
-        if addr_cached_time_value is None and instr.mnemonic == "mov" and len(instr.operands) > 1 \
-                and instr.operands[1].type == X86_OP_MEM and instr.operands[1].mem.disp == address_get_tick:
-            if idx + 2 < len(instructions):
-                next_instr = instructions[idx + 2]
-                if next_instr.mnemonic == "mov" and len(next_instr.operands) > 1 \
-                        and next_instr.operands[1].type == X86_OP_IMM:
-                    addr_cached_time_value = next_instr.operands[1].value.imm
-                    addr_cached_tick_count = addr_cached_time_value + 0x4
+        # Look for `mov reg, [GetTickCount@IAT]`, then `mov [addr], imm` — the address is the shared 8-byte region
+        if addr_cache_region is None and instr.mnemonic == "mov" and len(instr.operands) > 1:
+            if instr.operands[1].type == X86_OP_MEM and instr.operands[1].mem.disp == address_get_tickcount_iat:
+                if idx + 2 < len(instructions):
+                    next_instr = instructions[idx + 2]
+                    if next_instr.mnemonic == "mov" and len(next_instr.operands) > 1 \
+                            and next_instr.operands[1].type == X86_OP_IMM:
+                        addr_cache_region = next_instr.operands[1].value.imm
 
-    if addr_internal_time_func is None or addr_cached_time_value is None:
-        raise RuntimeError("Could not extract all time cache-related addresses.")
+    if addr_internal_time_func is None or addr_cache_region is None:
+        raise RuntimeError("Failed to locate time function and shared memory region.")
 
-    return (
-        addr_internal_time_func,
-        addr_cached_time_value,
-        addr_cached_tick_count,
-    )
+    return addr_internal_time_func, addr_cache_region
 
 
 def patch_fog_dll(file_path):
@@ -459,10 +454,21 @@ def patch_fog_dll(file_path):
 
         # Address extraction - locate time logic and global state.
         addr_time_init_func = locate_time_initializer(addr_time_init_ord, binary, code_section)
+
         addr_crit_section_struct = extract_critical_section_address(
-            addr_time_init_func, addr_init_crit_func, binary, code_section)
-        addr_internal_time_func, addr_cached_time_value, addr_cached_tick_count = \
-            extract_time_cache_addresses(addr_time_calc_ord, addr_get_tick_func, binary, code_section)
+            addr_time_init_func,
+            addr_init_crit_func,
+            binary, code_section)
+
+        addr_internal_time_func, addr_cache_region = extract_internal_time_function_and_cache_address(
+            addr_time_calc_ord,
+            addr_get_tick_func,
+            binary,
+            code_section)
+
+        if addr_cache_region:
+            addr_cached_time_value = addr_cache_region
+            addr_cached_tick_count = addr_cache_region + 0x4
 
         # Display all resolved addresses for verification and debugging purposes
         symbol_map = {
