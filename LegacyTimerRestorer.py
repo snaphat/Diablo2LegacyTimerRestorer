@@ -533,7 +533,8 @@ def patch_fog_dll(file_path, output_dir=None):
         # - If we're patching in-place and no backup exists, create one from the current file.
         if os.path.exists(backup_path):
             print(Fore.YELLOW + f"  Found backup at '{backup_path}'. Restoring it to '{file_path}' before patching.")
-            shutil.copy2(backup_path, file_path)
+            if not output_dir:
+                shutil.copy2(backup_path, file_path)
         elif not output_dir:
             shutil.copy2(file_path, backup_path)
 
@@ -570,7 +571,7 @@ def patch_fog_dll(file_path, output_dir=None):
         # Locate and extract the C runtime time() function and cache region
         crt_time_fn, cache_region = locate_crt_time_and_cache_region(calc_time_ord, get_tick_fn, binary, code_section)
 
-        # Assign cache addresses if region is defined; otherwise default to 0.
+        # Use discovered cache region if available; otherwise fallback to address 0.
         cached_time = cache_region or 0
         cached_tick = cached_time + 0x4 if cache_region else 0
 
@@ -630,7 +631,8 @@ def patch_fog_dll(file_path, output_dir=None):
         if os.path.exists(backup_path):
             print_aligned_message(
                 "Action", f"Restoring original file from '{backup_path}'.", Fore.YELLOW, Style.BRIGHT + Fore.WHITE, 30)
-            shutil.copy2(backup_path, file_path)
+            if not output_dir:
+                shutil.copy2(backup_path, file_path)
         else:
             print_aligned_message(
                 "Warning", "No original backup found to restore from. The file might be corrupted.",
@@ -673,9 +675,9 @@ def main() -> int:
 
     # Step 2: Process discovered files (if any)
     if found_files:
-        for f_path in found_files:
-            if not patch_fog_dll(f_path, output_dir=args.output_dir):
-                failed_files.append(f_path)
+        for file_path in found_files:
+            if not patch_fog_dll(file_path, output_dir=args.output_dir):
+                failed_files.append(file_path)
 
     # Step 3: Final summary and reporting
     print(Fore.WHITE + "\n--- Patching Summary ---")
@@ -683,8 +685,8 @@ def main() -> int:
         print(Fore.YELLOW + f"No '{target_file}' files were found. Nothing was processed.")
     elif failed_files:
         print(Fore.RED + "The following files failed to patch:")
-        for f_path in failed_files:
-            print(Fore.RED + f"  - {f_path}")
+        for file_path in failed_files:
+            print(Fore.RED + f"  - {file_path}")
         print(Fore.YELLOW + "Please review the error messages above for details on each failure.")
     else:
         print(Fore.CYAN + f"Found {len(found_files)} instance(s) of '{target_file}'.")
@@ -692,7 +694,8 @@ def main() -> int:
     print(Fore.WHITE + "Patching process complete.")
     return 0 if not failed_files else 1
 
-#endregion
+# endregion
+
 
 if __name__ == '__main__':
     sys.exit(main())
