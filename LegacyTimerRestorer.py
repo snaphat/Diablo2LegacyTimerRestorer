@@ -22,15 +22,18 @@ import argparse
 import os
 import shutil
 import sys
+from typing import List, Optional, Tuple
 
+import colorama
 import lief
-from capstone import CS_ARCH_X86, CS_MODE_32, Cs
+from capstone import CS_ARCH_X86, CS_MODE_32, Cs, CsInsn
 from capstone.x86_const import X86_OP_IMM, X86_OP_MEM
-from colorama import Fore, Style, init
-from keystone import KS_ARCH_X86, KS_MODE_32, Ks
+from colorama import Fore, Style
+from keystone import KS_ARCH_X86, KS_MODE_32, Ks, KsError
+from lief.PE import Binary, Section
 
 # Initialize Colorama for colored CLI output
-init(autoreset=True)
+colorama.init(autoreset=True)
 
 # region Known Diablo II Fog.dll Version Timestamps
 
@@ -91,28 +94,27 @@ FOG_DLL_VERSION_BY_TIMESTAMP  = {
 # region Utility Functions
 
 
-def print_aligned_message(label, value, label_color, value_color, align_width, indent=4):
+def print_pretty(label: str, value: str, label_color: str, value_color: str, align_width: int, indent:Optional[int]=4):
     """
-    Prints a colorized and aligned message with a label and its corresponding value.
+    Prints an aligned and colorized label–value pair to the console.
 
     Args:
-        label (str): The descriptive label text.
-        value (str): The value associated with the label.
-        label_color (colorama.Fore): The color for the label text.
-        value_color (colorama.Fore): The color for the value text.
-        align_width (int): The width allocated for aligning the label text.
-        indent (int, optional): The number of spaces to indent the entire line. Defaults to 4.
+        label (str): The label text to display.
+        value (str): The value text associated with the label.
+        label_color (str): ANSI color code for the label (e.g., colorama.Fore.*).
+        value_color (str): ANSI color code for the value (e.g., colorama.Fore.*).
+        align_width (int): Number of characters to reserve for the label alignment.
+        indent (int, optional): Number of spaces to indent the line. Defaults to 4.
 
     Returns:
         None
     """
     indent_str = " " * indent
     formatted_label = f"{label:<{align_width}}"
-    print(f"{indent_str}{label_color}{formatted_label}{Style.RESET_ALL}: " +
-          f"{value_color}{value}{Style.RESET_ALL}")
+    print(f"{indent_str}{label_color}{formatted_label}{Style.RESET_ALL}: " + f"{value_color}{value}{Style.RESET_ALL}")
 
 
-def resolve_imported_symbol(binary: lief.PE.Binary, symbol_name: str) -> int:
+def resolve_imported_symbol(binary: Binary, symbol_name: str) -> int:
     """
     Resolves the virtual address (VA) of an imported function by name.
 
@@ -127,7 +129,7 @@ def resolve_imported_symbol(binary: lief.PE.Binary, symbol_name: str) -> int:
         RuntimeError: If the function name is not found in the import table.
     """
     base = binary.optional_header.imagebase
-    print_aligned_message("Resolving imported symbol", symbol_name, Fore.CYAN, Style.BRIGHT + Fore.WHITE, 30)
+    print_pretty("Resolving imported symbol", symbol_name, Fore.CYAN, Style.BRIGHT + Fore.WHITE, 30)
 
     for entry in binary.imports:
         for function in entry.entries:
@@ -137,7 +139,7 @@ def resolve_imported_symbol(binary: lief.PE.Binary, symbol_name: str) -> int:
     raise RuntimeError(f"Imported symbol '{symbol_name}' not found.")
 
 
-def resolve_exported_symbol(binary: lief.PE.Binary, ordinal: int) -> int:
+def resolve_exported_symbol(binary: Binary, ordinal: int) -> int:
     """
     Resolves the virtual address (VA) of an exported function by ordinal.
 
@@ -152,7 +154,7 @@ def resolve_exported_symbol(binary: lief.PE.Binary, ordinal: int) -> int:
         RuntimeError: If the ordinal is not found in the export table.
     """
     base = binary.optional_header.imagebase
-    print_aligned_message("Resolving exported symbol", str(ordinal), Fore.CYAN, Style.BRIGHT + Fore.WHITE, 30)
+    print_pretty("Resolving exported symbol", str(ordinal), Fore.CYAN, Style.BRIGHT + Fore.WHITE, 30)
 
     export_table = binary.get_export()
     ordinal_base = export_table.ordinal_base
@@ -165,7 +167,7 @@ def resolve_exported_symbol(binary: lief.PE.Binary, ordinal: int) -> int:
     return base + rva
 
 
-def disassemble_function(virtual_address, binary, code_section):
+def disassemble_function(virtual_address: int, binary: Binary, code_section: Section) -> List[CsInsn]:
     """
     Disassembles a sequence of bytes from the specified code section using Capstone, starting at the given virtual
     address.
@@ -184,8 +186,7 @@ def disassemble_function(virtual_address, binary, code_section):
         of the specified code section.
     """
     base = binary.optional_header.imagebase
-    print_aligned_message("Disassembling function at",
-                          f"0x{virtual_address:08X}", Fore.MAGENTA, Style.BRIGHT + Fore.WHITE, 30)
+    print_pretty("Disassembling function at", f"0x{virtual_address:08X}", Fore.MAGENTA, Style.BRIGHT + Fore.WHITE, 30)
 
     section_bytes = bytes(code_section.content)
     section_rva = code_section.virtual_address
@@ -203,7 +204,7 @@ def disassemble_function(virtual_address, binary, code_section):
     return list(disassembler.disasm(function_bytes, virtual_address))
 
 
-def apply_patch(virtual_address, asm_source, assembler, binary, code_section):
+def apply_patch(virtual_address: int, asm_source, assembler, binary: Binary, code_section: Section) -> None:
     """
     Assembles the provided x86 assembly source code into machine bytes using Keystone, and then injects these bytes into
     the target binary's `.text` section at the specified virtual address.
@@ -212,10 +213,8 @@ def apply_patch(virtual_address, asm_source, assembler, binary, code_section):
     logic.
 
     Args:
-        virtual_address (int): The virtual address (VA) where the patch bytes
-                               should be written.
-        asm_source (str): A multi-line string containing the x86 assembly
-                          code to be assembled.
+        virtual_address (int): The virtual address (VA) where the patch bytes should be written.
+        asm_source (str): A multi-line string containing the x86 assembly code to be assembled.
         assembler (keystone.Ks): An initialized Keystone assembler instance.
         binary (lief.PE.Binary): The LIEF binary object to be patched.
         code_section (lief.PE.Section): The `.text` (code) section of the binary.
@@ -225,13 +224,14 @@ def apply_patch(virtual_address, asm_source, assembler, binary, code_section):
                     of the `code_section`.
     """
     base = binary.optional_header.imagebase
-    print_aligned_message(
-        "Applying patch at", f"0x{virtual_address:08X}", Fore.YELLOW, Style.BRIGHT + Fore.WHITE, 30)
+    print_pretty("Applying patch at", f"0x{virtual_address:08X}", Fore.YELLOW, Style.BRIGHT + Fore.WHITE, 30)
     # Assemble the provided assembly source into machine code bytes
-    patch_bytes = assembler.asm(asm_source, virtual_address)[0]
+    try:
+        patch_bytes = assembler.asm(asm_source, virtual_address)[0]
+    except KsError as e:
+        raise RuntimeError(f"Keystone assembly failed: {e}")
 
-    print_aligned_message(
-        "Patch size", f"{len(patch_bytes)} bytes", Fore.YELLOW, Style.BRIGHT + Fore.WHITE, 30)
+    print_pretty("Patch size", f"{len(patch_bytes)} bytes", Fore.YELLOW, Style.BRIGHT + Fore.WHITE, 30)
 
     # Calculate the offset within the code section's content array
     offset = virtual_address - base - code_section.virtual_address
@@ -251,8 +251,8 @@ def apply_patch(virtual_address, asm_source, assembler, binary, code_section):
 # region Patch Assembly Generation
 
 
-def init_time_asm(cs, init_cs_fn, crt_time_fn, cached_time, get_tick_fn, cached_tick
-                  ):
+def init_time_asm(
+        cs: int, init_cs_fn: int, crt_time_fn: int, cached_time: int, get_tick_fn: int, cached_tick: int) -> str:
     """
     Returns the assembly string for initializing the legacy time caching system in Fog.dll.
 
@@ -261,7 +261,7 @@ def init_time_asm(cs, init_cs_fn, crt_time_fn, cached_time, get_tick_fn, cached_
     count into the appropriate memory addresses for use by the main time retrieval logic.
 
     Parameters:
-        cs (int):          Address of the critical section structure.
+        cs (int):          address of the CRITICAL_SECTION object.
         init_cs_fn (int):  Address of InitializeCriticalSection.
         crt_time_fn (int): Address of the internal time calculation function.
         cached_time (int): Address to store the initial time value.
@@ -284,7 +284,9 @@ def init_time_asm(cs, init_cs_fn, crt_time_fn, cached_time, get_tick_fn, cached_
         """
 
 
-def calc_time_asm(get_tick_fn, cached_tick, cs, enter_cs_fn, crt_time_fn, cached_time, leave_cs_fn):
+def calc_time_asm(
+        get_tick_fn: int, cached_tick: int, cs: int, enter_cs_fn: int, crt_time_fn: int, cached_time: int,
+        leave_cs_fn: int) -> str:
     """
     Returns the assembly string that implements the restored legacy time retrieval function for Fog.dll, replacing the
     logic at ordinal 10036/10055.
@@ -317,7 +319,7 @@ def calc_time_asm(get_tick_fn, cached_tick, cs, enter_cs_fn, crt_time_fn, cached
         # --- Time update logic (entered if time difference is significant) ---
         push {cs}                            # Push address of Critical Section structure
         call dword ptr [{enter_cs_fn}]       # EnterCriticalSection (synchronize access)
-        push 0                               # Push 0 (argument for address_time_update_func)
+        push 0                               # Push 0 (argument for crt time function)
         call {crt_time_fn}                   # Call internal time calculation function
         add esp, 4                           # Clean up stack after call (for pushed 0)
         mov dword ptr [{cached_time}], eax   # Store new calculated time value
@@ -342,7 +344,7 @@ def calc_time_asm(get_tick_fn, cached_tick, cs, enter_cs_fn, crt_time_fn, cached
 # region: Symbol Locator Functions
 
 
-def locate_time_initializer(init_game_ord, binary, code_section):
+def locate_time_initializer(init_game_ord: int, binary: Binary, code_section) -> int:
     """
     Locates the internal time initialization routine invoked by the game's global initializer.
 
@@ -377,7 +379,7 @@ def locate_time_initializer(init_game_ord, binary, code_section):
     raise RuntimeError("Failed to locate internal time initializer: expected call + lea pattern not found.")
 
 
-def locate_critical_section_struct(init_time_fn: int, init_cs_fn: int, binary, code_section) -> int:
+def locate_critical_section_struct(init_time_fn: int, init_cs_fn: int, binary: Binary, code_section: Section) -> int:
     """
     Identifies the address of the global CRITICAL_SECTION used by Fog.dll's time system by analyzing its internal time
     initialization function.
@@ -418,7 +420,8 @@ def locate_critical_section_struct(init_time_fn: int, init_cs_fn: int, binary, c
     raise RuntimeError("Failed to locate critical section address near call to InitializeCriticalSection.")
 
 
-def locate_crt_time_and_cache_region(calc_time_ord, get_tick_fn, binary, code_section):
+def locate_crt_time_and_cache_region(
+        calc_time_ord: int, get_tick_fn: int, binary: Binary, code_section: Section) -> Tuple[int, int]:
     """
     Identifies addresses used by Fog.dll's internal time computation logic and its associated shared memory region by
     analyzing the exported time calculation routine.
@@ -488,7 +491,7 @@ def locate_crt_time_and_cache_region(calc_time_ord, get_tick_fn, binary, code_se
 # region: Patch Application Logic
 
 
-def patch_fog_dll(file_path, output_dir=None):
+def patch_fog_dll(file_path: str, output_dir: Optional[str] = None) -> bool:
     print(Fore.WHITE + f"\n--- Processing: {file_path} ---")
 
     backup_path = file_path + ".bak"  # Path to the definitive original backup
@@ -503,14 +506,14 @@ def patch_fog_dll(file_path, output_dir=None):
         # Version detection - determine the game version from the PE timestamp.
         timestamp = binary.header.time_date_stamps
         current_version_name = FOG_DLL_VERSION_BY_TIMESTAMP.get(timestamp, "Unknown")
-        print_aligned_message("Fog.dll Version", current_version_name, Fore.BLUE, Style.BRIGHT + Fore.WHITE, 30)
-        print_aligned_message("Timestamp", f"0x{timestamp:08X}", Fore.BLUE, Style.BRIGHT + Fore.WHITE, 30)
+        print_pretty("Fog.dll Version", current_version_name, Fore.BLUE, Style.BRIGHT + Fore.WHITE, 30)
+        print_pretty("Timestamp", f"0x{timestamp:08X}", Fore.BLUE, Style.BRIGHT + Fore.WHITE, 30)
 
         # Check if patching is necessary based on the version timestamp.
         # Versions earlier than 1.06 already use the desired logic.
         if timestamp < VERSION_106_TIMESTAMP:
-            print_aligned_message("Info", "Fog.dll is from a version earlier than 1.06. Patching is not necessary.",
-                                  Fore.BLUE, Style.BRIGHT + Fore.WHITE, 30)
+            print_pretty("Info", "Fog.dll is from a version earlier than 1.06. Patching is not necessary.",
+                         Fore.BLUE, Style.BRIGHT + Fore.WHITE, 30)
             # If no patching is needed, remove any temporary backup and exit.
             if os.path.exists(backup_path):
                 os.remove(backup_path)
@@ -598,7 +601,7 @@ def patch_fog_dll(file_path, output_dir=None):
         for name, addr in symbol_map.items():
             if not addr:
                 raise ValueError(f"  {name} is zero or undefined. Cannot proceed without this address.")
-            print_aligned_message(name, f"0x{addr:08X}", Fore.BLUE, Style.BRIGHT + Fore.WHITE, 30)
+            print_pretty(name, f"0x{addr:08X}", Fore.BLUE, Style.BRIGHT + Fore.WHITE, 30)
 
         # Assembly generation - create the assembly code for the time initialization and calculation functions.
         init_asm = init_time_asm(cs, init_cs_fn, crt_time_fn, cached_time, get_tick_fn, cached_tick)
@@ -615,26 +618,24 @@ def patch_fog_dll(file_path, output_dir=None):
 
         # File saving - write the modified binary back to disk.
         print()
-        print_aligned_message("Saving patched binary to", file_path, Fore.GREEN,
-                              Style.BRIGHT + Fore.WHITE, 32, indent=2)
+        print_pretty("Saving patched binary to", file_path, Fore.GREEN, Style.BRIGHT + Fore.WHITE, 32, indent=2)
         binary.write(target_path)
         print()
-        print_aligned_message("Status", "Success", Fore.GREEN, Style.BRIGHT + Fore.WHITE, 32, indent=2)
+        print_pretty("Status", "Success", Fore.GREEN, Style.BRIGHT + Fore.WHITE, 32, indent=2)
         return True
 
     except Exception as e:
-        print_aligned_message("Error", f"Patching {file_path} failed: {e}", Fore.RED, Style.BRIGHT + Fore.WHITE, 30)
+        print_pretty("Error", f"Patching {file_path} failed: {e}", Fore.RED, Style.BRIGHT + Fore.WHITE, 30)
         # Roll back to the original if possible
         if os.path.exists(backup_path):
-            print_aligned_message(
-                "Action", f"Restoring original file from '{backup_path}'.", Fore.YELLOW, Style.BRIGHT + Fore.WHITE, 30)
+            print_pretty("Action", f"Restoring original file from '{backup_path}'.",
+                         Fore.YELLOW, Style.BRIGHT + Fore.WHITE, 30)
             if not output_dir:
                 shutil.copy2(backup_path, file_path)
         else:
-            print_aligned_message(
-                "Warning", "No original backup found to restore from. The file might be corrupted.",
-                Fore.RED, Style.BRIGHT + Fore.WHITE, 30)
-        print_aligned_message("Result", "Patching failed.", Fore.RED, Style.BRIGHT + Fore.WHITE, 30)
+            print_pretty("Warning", "No original backup found to restore from. The file might be corrupted.",
+                         Fore.RED, Style.BRIGHT + Fore.WHITE, 30)
+        print_pretty("Result", "Patching failed.", Fore.RED, Style.BRIGHT + Fore.WHITE, 30)
         return False
 
 # endregion
