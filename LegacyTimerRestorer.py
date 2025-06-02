@@ -30,9 +30,7 @@ import shutil
 # Initialize Colorama for colored CLI output
 init(autoreset=True)
 
-# --------------------------------------------------------------------------
-# Known Diablo II Fog.dll Version Timestamps
-# --------------------------------------------------------------------------
+# region Known Diablo II Fog.dll Version Timestamps
 
 VERSION_100_TIMESTAMP       = 0x392ec7d4
 VERSION_101_TIMESTAMP       = 0x3957d5f7
@@ -86,7 +84,10 @@ FOG_DLL_VERSION_BY_TIMESTAMP  = {
     VERSION_113D_TIMESTAMP:      "1.13d",
 }
 
+#endregion
+
 # region Utility Functions
+
 
 def print_aligned_message(label, value, label_color, value_color, align_width, indent=4):
     """
@@ -334,7 +335,9 @@ def calc_time_asm(get_tick_fn, cached_tick, cs, enter_cs_fn, crt_time_fn, cached
         .byte 0x03, 0xC1                     # add eax, ecx (Add scaled tick difference to cached time value)
         ret                                  # Return with calculated time in EAX
     """
-#endregion
+# endregion
+
+# region: Symbol Locator Functions
 
 
 def locate_time_initializer(init_time_ord, binary, code_section):
@@ -410,7 +413,7 @@ def locate_critical_section_struct(init_time_fn: int, init_cs_fn: int, binary, c
             push_ops = push_instr.operands
             call_ops = call_instr.operands
             if (push_ops and push_ops[0].type == X86_OP_IMM and
-                call_ops and call_ops[0].type == X86_OP_MEM and call_ops[0].value.mem.disp == init_cs_fn):
+                    call_ops and call_ops[0].type == X86_OP_MEM and call_ops[0].value.mem.disp == init_cs_fn):
                 return push_ops[0].value.imm
 
     raise RuntimeError("Failed to locate critical section address near call to InitializeCriticalSection.")
@@ -481,6 +484,7 @@ def locate_crt_time_and_cache_region(calc_time_ord, get_tick_fn, binary, code_se
 
     return crt_time_fn, cache_region
 
+# endregion
 
 def patch_fog_dll(file_path):
     print(Fore.WHITE + f"\n--- Processing: {file_path} ---")
