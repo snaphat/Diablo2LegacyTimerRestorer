@@ -492,34 +492,49 @@ def locate_crt_time_and_cache_region(
 
 
 def patch_fog_dll(file_path: str, output_dir: Optional[str] = None) -> bool:
+    """
+    Applies a patch to a Diablo II Fog.dll binary that restores the original time caching logic used in pre-1.06
+    versions of the game.
+
+    This involves:
+    - Identifying exported and imported symbol addresses
+    - Locating internal routines and data structures
+    - Generating and injecting x86 assembly into the binary
+    - Creating or restoring backups to ensure safe patching
+
+    Args:
+        file_path (str): Full path to the Fog.dll binary to patch.
+        output_dir (Optional[str]): If provided, writes the patched binary to a parallel path rooted at output_dir.
+                                    Otherwise, modifies in-place.
+
+    Returns:
+        bool: True if the patch was applied successfully or unnecessary due to version;
+              False if an error occurred and patching failed.
+    """
     print(Fore.WHITE + f"\n--- Processing: {file_path} ---")
 
     backup_path = file_path + ".bak"  # Path to the definitive original backup
 
     try:
-        # Binary loading - parse the binary and locate key sections.
+        # Load the binary using LIEF and ensure it's valid
         print(Fore.GREEN + "  Loading binary...")
         binary = lief.parse(file_path)
         if binary is None:
             raise RuntimeError("Failed to parse the binary. Please ensure it's a valid PE file.")
 
-        # Version detection - determine the game version from the PE timestamp.
+        # Detect game version using the PE timestamp
         timestamp = binary.header.time_date_stamps
         current_version_name = FOG_DLL_VERSION_BY_TIMESTAMP.get(timestamp, "Unknown")
         print_pretty("Fog.dll Version", current_version_name, Fore.BLUE, Style.BRIGHT + Fore.WHITE, 30)
         print_pretty("Timestamp", f"0x{timestamp:08X}", Fore.BLUE, Style.BRIGHT + Fore.WHITE, 30)
 
-        # Check if patching is necessary based on the version timestamp.
-        # Versions earlier than 1.06 already use the desired logic.
+        # Abort if patching is not required (version predates 1.06)
         if timestamp < VERSION_106_TIMESTAMP:
             print_pretty("Info", "Fog.dll is from a version earlier than 1.06. Patching is not necessary.",
                          Fore.BLUE, Style.BRIGHT + Fore.WHITE, 30)
-            # If no patching is needed, remove any temporary backup and exit.
-            if os.path.exists(backup_path):
-                os.remove(backup_path)
             return True
 
-        # At this point, we know we'll patch; set up output directory if provided.
+        # Resolve output path
         if output_dir:
             out_path = os.path.join(output_dir, os.path.relpath(file_path, start='.'))
             os.makedirs(os.path.dirname(out_path), exist_ok=True)
@@ -528,9 +543,8 @@ def patch_fog_dll(file_path: str, output_dir: Optional[str] = None) -> bool:
         else:
             target_path = file_path
 
-        # Backup management:
-        # - If a .bak file already exists, restore it to ensure we patch from a clean original.
-        # - If we're patching in-place and no backup exists, create one from the current file.
+        # Backup: if a .bak file exists, restore it to patch a clean copy;
+        # otherwise create one if patching in-place
         if os.path.exists(backup_path):
             print(Fore.YELLOW + f"  Found backup at '{backup_path}'. Restoring it to '{file_path}' before patching.")
             if not output_dir:
@@ -538,15 +552,14 @@ def patch_fog_dll(file_path: str, output_dir: Optional[str] = None) -> bool:
         elif not output_dir:
             shutil.copy2(file_path, backup_path)
 
-        # Find the .text section, which contains the executable code
+        # Locate the .text section for code injection
         code_section = next((s for s in binary.sections if s.name == ".text"), None)
         if not code_section:
             raise RuntimeError("No .text section found in the binary. This file might be malformed.")
 
-        # Symbol resolution - resolve export addresses.
         print(Fore.GREEN + "\n  Resolving required symbols...")
 
-        # Exported functions from Fog.dll (resolved by ordinal; varies by D2 version)
+        # Resolve exported ordinals (varies by D2 version)
         if timestamp < VERSION_107_TIMESTAMP or timestamp == VERSION_106B_TIMESTAMP:
             # Versions 1.06 and 1.06b use these ordinals
             init_game_ord = resolve_exported_symbol(binary, 10017)  # Game initialization routine
@@ -556,26 +569,22 @@ def patch_fog_dll(file_path: str, output_dir: Optional[str] = None) -> bool:
             init_game_ord = resolve_exported_symbol(binary, 10019)  # Game initialization routine
             calc_time_ord = resolve_exported_symbol(binary, 10055)  # Time calculation routine
 
-        # Imported Windows API functions (resolved by name from the export table or IAT)
+        # Resolve Windows API imports
         init_cs_fn  = resolve_imported_symbol(binary, "InitializeCriticalSection")
         get_tick_fn = resolve_imported_symbol(binary, "GetTickCount")
         enter_cs_fn = resolve_imported_symbol(binary, "EnterCriticalSection")
         leave_cs_fn = resolve_imported_symbol(binary, "LeaveCriticalSection")
 
-        # Locate and extract time initialization function
+        # Locate internal logic and global state structures
         init_time_fn = locate_time_initializer(init_game_ord, binary, code_section)
-
-        # Locate and extract the CRITICAL_SECTION structure
         cs = locate_critical_section_struct(init_time_fn, init_cs_fn, binary, code_section)
-
-        # Locate and extract the C runtime time() function and cache region
         crt_time_fn, cache_region = locate_crt_time_and_cache_region(calc_time_ord, get_tick_fn, binary, code_section)
 
         # Use discovered cache region if available; otherwise fallback to address 0.
         cached_time = cache_region or 0
         cached_tick = cached_time + 0x4 if cache_region else 0
 
-        # Display all resolved addresses for verification and debugging purposes
+        # Print resolved addresses
         symbol_map = {
             # Imported Windows API functions
             "IAT:InitializeCriticalSection": init_cs_fn,
@@ -603,20 +612,18 @@ def patch_fog_dll(file_path: str, output_dir: Optional[str] = None) -> bool:
                 raise ValueError(f"  {name} is zero or undefined. Cannot proceed without this address.")
             print_pretty(name, f"0x{addr:08X}", Fore.BLUE, Style.BRIGHT + Fore.WHITE, 30)
 
-        # Assembly generation - create the assembly code for the time initialization and calculation functions.
+        # Generate replacement assembly for time init and time calc
         init_asm = init_time_asm(cs, init_cs_fn, crt_time_fn, cached_time, get_tick_fn, cached_tick)
         calc_asm = calc_time_asm(get_tick_fn, cached_tick, cs, enter_cs_fn, crt_time_fn, cached_time, leave_cs_fn)
 
-        # Patch injection - write assembled instructions into the binary.
         print(Fore.GREEN + "\n  Patching functions...")
 
-        # Initialize the Keystone assembler for generating machine code from assembly
+        # Assemble and write patch code
         assembler = Ks(KS_ARCH_X86, KS_MODE_32)
-
         apply_patch(init_time_fn, init_asm, assembler, binary, code_section)
         apply_patch(calc_time_ord, calc_asm, assembler, binary, code_section)
 
-        # File saving - write the modified binary back to disk.
+        # Save the patched binary
         print()
         print_pretty("Saving patched binary to", file_path, Fore.GREEN, Style.BRIGHT + Fore.WHITE, 32, indent=2)
         binary.write(target_path)
