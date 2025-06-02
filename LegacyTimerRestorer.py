@@ -18,14 +18,16 @@ Tools Used:
 - Colorama: For colored CLI output.
 """
 
-import lief
-from capstone import Cs, CS_ARCH_X86, CS_MODE_32, CS_GRP_RET
-from keystone import Ks, KS_ARCH_X86, KS_MODE_32
-from capstone.x86_const import X86_OP_MEM, X86_OP_IMM
-from colorama import init, Fore, Style
-
+import argparse
 import os
 import shutil
+import sys
+
+import lief
+from capstone import CS_ARCH_X86, CS_MODE_32, Cs
+from capstone.x86_const import X86_OP_IMM, X86_OP_MEM
+from colorama import Fore, Style, init
+from keystone import KS_ARCH_X86, KS_MODE_32, Ks
 
 # Initialize Colorama for colored CLI output
 init(autoreset=True)
@@ -486,20 +488,15 @@ def locate_crt_time_and_cache_region(calc_time_ord, get_tick_fn, binary, code_se
 
 # endregion
 
-def patch_fog_dll(file_path):
+# region: Patch Application Logic
+
+
+def patch_fog_dll(file_path, output_dir=None):
     print(Fore.WHITE + f"\n--- Processing: {file_path} ---")
-    backup_path = file_path + ".bak"  # Define the path for the primary, definitive original backup
+
+    backup_path = file_path + ".bak"  # Path to the definitive original backup
 
     try:
-        # Backup management - always patch from a clean original. If an existing backup (.bak) is found, it means a
-        # previous patch might have been applied. We restore the file from this backup to ensure we're always working on
-        # the original, unpatched version.
-        if os.path.exists(backup_path):
-            print(Fore.YELLOW + f"  Found backup at '{backup_path}'. Restoring it to '{file_path}' before patching.")
-            shutil.copy2(backup_path, file_path)
-        else:
-            shutil.copy2(file_path, backup_path)  # If no backup exists, create one from the current Fog.dll.
-
         # Binary loading - parse the binary and locate key sections.
         print(Fore.GREEN + "  Loading binary...")
         binary = lief.parse(file_path)
@@ -517,17 +514,35 @@ def patch_fog_dll(file_path):
         if timestamp < VERSION_106_TIMESTAMP:
             print_aligned_message("Info", "Fog.dll is from a version earlier than 1.06. Patching is not necessary.",
                                   Fore.BLUE, Style.BRIGHT + Fore.WHITE, 30)
-            # If no patching is needed, remove the temporary backup to clean up
+            # If no patching is needed, remove any temporary backup and exit.
             if os.path.exists(backup_path):
                 os.remove(backup_path)
             return True
+
+        # At this point, we know we'll patch; set up output directory if provided.
+        if output_dir:
+            out_path = os.path.join(output_dir, os.path.relpath(file_path, start='.'))
+            os.makedirs(os.path.dirname(out_path), exist_ok=True)
+            print(Fore.CYAN + f"Writing patched to: {out_path}")
+            target_path = out_path
+        else:
+            target_path = file_path
+
+        # Backup management:
+        # - If a .bak file already exists, restore it to ensure we patch from a clean original.
+        # - If we're patching in-place and no backup exists, create one from the current file.
+        if os.path.exists(backup_path):
+            print(Fore.YELLOW + f"  Found backup at '{backup_path}'. Restoring it to '{file_path}' before patching.")
+            shutil.copy2(backup_path, file_path)
+        elif not output_dir:
+            shutil.copy2(file_path, backup_path)
 
         # Find the .text section, which contains the executable code
         code_section = next((s for s in binary.sections if s.name == ".text"), None)
         if not code_section:
             raise RuntimeError("No .text section found in the binary. This file might be malformed.")
 
-        # Symbol resolution - resolve exports addresses.
+        # Symbol resolution - resolve export addresses.
         print(Fore.GREEN + "\n  Resolving required symbols...")
 
         # Exported functions from Fog.dll (resolved by ordinal; varies by D2 version)
@@ -604,7 +619,7 @@ def patch_fog_dll(file_path):
         print()
         print_aligned_message("Saving patched binary to", file_path, Fore.GREEN,
                               Style.BRIGHT + Fore.WHITE, 32, indent=2)
-        binary.write(file_path)
+        binary.write(target_path)
         print()
         print_aligned_message("Status", "Success", Fore.GREEN, Style.BRIGHT + Fore.WHITE, 32, indent=2)
         return True
@@ -623,40 +638,61 @@ def patch_fog_dll(file_path):
         print_aligned_message("Result", "Patching failed.", Fore.RED, Style.BRIGHT + Fore.WHITE, 30)
         return False
 
+# endregion
 
-# --------------------------------------------------------------------------
-# Main Execution
-# --------------------------------------------------------------------------
+# region: Main Execution Logic
 
-if __name__ == "__main__":
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--output-dir", help="Directory to write patched files to")
+    args = parser.parse_args()
+
     target_file = "Fog.dll"
-    print(Fore.CYAN + f"Searching for '{target_file}' in current directory and subdirectories...")
+    print(Fore.CYAN + f"Searching for '{target_file}'...")
 
+    # Step 1: Determine which Fog.dll files to patch:
+    # - If --output-dir is specified, recursively search from the current directory,
+    #   excluding the output directory itself.
+    # - Otherwise, search only the current directory (non-recursively).
     found_files = []
-    # Step 1: Recursively search for all Fog.dll files
-    for root, _, files in os.walk("."):
-        for file in files:
+    if args.output_dir:
+        output_abs = os.path.abspath(args.output_dir)
+        for root, _, files in os.walk("."):
+            if os.path.abspath(root).startswith(output_abs):
+                continue
+            for file in files:
+                if file.lower() == target_file.lower():
+                    found_files.append(os.path.join(root, file))
+    else:
+        for file in os.listdir("."):
             if file.lower() == target_file.lower():
-                found_files.append(os.path.join(root, file))
+                found_files.append(file)
 
     failed_files = []
 
-    # Step 2: Report and process discovered files
-    if not found_files:
-        print(Fore.YELLOW + f"No '{target_file}' found in the current directory or its subdirectories.")
-    else:
-        print(Fore.CYAN + f"Found {len(found_files)} instances of '{target_file}'.")
+    # Step 2: Process discovered files (if any)
+    if found_files:
         for f_path in found_files:
-            if not patch_fog_dll(f_path):
+            if not patch_fog_dll(f_path, output_dir=args.output_dir):
                 failed_files.append(f_path)
 
-    # Step 3: Final summary
+    # Step 3: Final summary and reporting
     print(Fore.WHITE + "\n--- Patching Summary ---")
-    if failed_files:
+    if not found_files:
+        print(Fore.YELLOW + f"No '{target_file}' files were found. Nothing was processed.")
+    elif failed_files:
         print(Fore.RED + "The following files failed to patch:")
         for f_path in failed_files:
             print(Fore.RED + f"  - {f_path}")
         print(Fore.YELLOW + "Please review the error messages above for details on each failure.")
     else:
+        print(Fore.CYAN + f"Found {len(found_files)} instance(s) of '{target_file}'.")
         print(Fore.GREEN + "All found Fog.dll files were successfully processed.")
     print(Fore.WHITE + "Patching process complete.")
+    return 0 if not failed_files else 1
+
+#endregion
+
+if __name__ == '__main__':
+    sys.exit(main())
