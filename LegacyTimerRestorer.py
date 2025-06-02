@@ -243,17 +243,13 @@ def apply_patch(virtual_address, asm_source, assembler, binary, code_section):
     updated_content[offset:offset + len(patch_bytes)] = patch_bytes
     code_section.content = updated_content  # Assign the modified content back
 
-#endregion
+# endregion
 
 # region Patch Assembly Generation
-def get_time_init_asm(
-    addr_crit_section_struct,
-    addr_init_crit_func,
-    addr_internal_time_func,
-    addr_cached_time_value,
-    addr_get_tick_func,
-    addr_cached_tick_count
-):
+
+
+def init_time_asm(cs, init_cs_fn, crt_time_fn, cached_time, get_tick_fn, cached_tick
+                  ):
     """
     Returns the assembly string for initializing the legacy time caching system in Fog.dll.
 
@@ -262,38 +258,30 @@ def get_time_init_asm(
     count into the appropriate memory addresses for use by the main time retrieval logic.
 
     Parameters:
-        addr_crit_section_struct (int): Address of the critical section structure.
-        addr_init_crit_func (int):      Address of InitializeCriticalSection.
-        addr_internal_time_func (int):  Address of the internal time calculation function.
-        addr_cached_time_value (int):   Address to store the initial time value.
-        addr_get_tick_func (int):       Address of GetTickCount (or equivalent).
-        addr_cached_tick_count (int):   Address to store the initial tick value.
+        cs (int):          Address of the critical section structure.
+        init_cs_fn (int):  Address of InitializeCriticalSection.
+        crt_time_fn (int): Address of the internal time calculation function.
+        cached_time (int): Address to store the initial time value.
+        get_tick_fn (int): Address of GetTickCount (or equivalent).
+        cached_tick (int): Address to store the initial tick value.
 
     Returns:
         str: Assembly code as a string.
     """
     return f"""
-        push {addr_crit_section_struct}                 # Push address of Critical Section structure
-        call dword ptr [{addr_init_crit_func}]          # InitializeCriticalSection
-        push 0                                          # Argument for internal time func (usually 0)
-        call {addr_internal_time_func}                  # Call internal time calculation function
-        add esp, 4                                      # Clean up stack after call
-        mov dword ptr [{addr_cached_time_value}], eax   # Store initial calculated time value
-        call dword ptr [{addr_get_tick_func}]           # Get current tick count
-        mov dword ptr [{addr_cached_tick_count}], eax   # Store initial cached tick count
-        ret                                             # Return
+        push {cs}                          # Push address of Critical Section structure
+        call dword ptr [{init_cs_fn}]      # InitializeCriticalSection
+        push 0                             # Argument for internal time func (usually 0)
+        call {crt_time_fn}                 # Call internal time calculation function
+        add esp, 4                         # Clean up stack after call
+        mov dword ptr [{cached_time}], eax # Store initial calculated time value
+        call dword ptr [{get_tick_fn}]     # Get current tick count
+        mov dword ptr [{cached_tick}], eax # Store initial cached tick count
+        ret                                # Return
         """
 
 
-def get_main_time_retrieval_asm(
-    addr_get_tick_func,
-    addr_cached_tick_count,
-    addr_crit_section_struct,
-    addr_enter_crit_func,
-    addr_internal_time_func,
-    addr_cached_time_value,
-    addr_leave_crit_func
-):
+def calc_time_asm(get_tick_fn, cached_tick, cs, enter_cs_fn, crt_time_fn, cached_time, leave_cs_fn):
     """
     Returns the assembly string that implements the restored legacy time retrieval function for Fog.dll, replacing the
     logic at ordinal 10036/10055.
@@ -303,52 +291,53 @@ def get_main_time_retrieval_asm(
     necessary.
 
     Parameters:
-        addr_get_tick_func (int): Address of GetTickCount (or equivalent).
-        addr_cached_tick_count (int): Address of the last cached tick value.
-        addr_crit_section_struct (int): Address of the critical section struct.
-        addr_enter_crit_func (int): Address of EnterCriticalSection.
-        addr_internal_time_func (int): Address of the internal time calculation function.
-        addr_cached_time_value (int): Address of the cached time value.
-        addr_leave_crit_func (int): Address of LeaveCriticalSection.
+        get_tick_fn (int): Address of GetTickCount (or equivalent).
+        cached_tick (int): Address of the last cached tick value.
+        cs (int):          Address of the critical section struct.
+        enter_cs_fn (int): Address of EnterCriticalSection.
+        crt_time_fn (int): Address of the internal time calculation function.
+        cached_time (int): Address of the cached time value.
+        leave_cs_fn (int): Address of LeaveCriticalSection.
 
     Returns:
         str: Assembly code as a string.
     """
     return f"""
-        push esi                                        # Save ESI register
-        call dword ptr [{addr_get_tick_func}]           # Call GetTickCount to get current tick
-        mov edx, dword ptr [{addr_cached_tick_count}]   # Load last cached tick count into EDX
-        .byte 0x8B, 0xF0                                # mov esi, eax (EAX holds current tick count from GetTickCount)
-        .byte 0x2B, 0xC2                                # sub eax, edx (EAX = current_tick - last_cached_tick)
-        cmp eax, 0x7FFFFFFF                             # Compare difference with 0x7FFFFFFF (large positive number)
-        jbe skip                                        # If difference is less than or equal, skip update
+        push esi                             # Save ESI register
+        call dword ptr [{get_tick_fn}]       # Call GetTickCount to get current tick
+        mov edx, dword ptr [{cached_tick}]   # Load last cached tick count into EDX
+        .byte 0x8B, 0xF0                     # mov esi, eax (EAX holds current tick count from GetTickCount)
+        .byte 0x2B, 0xC2                     # sub eax, edx (EAX = current_tick - last_cached_tick)
+        cmp eax, 0x7FFFFFFF                  # Compare difference with 0x7FFFFFFF (large positive number)
+        jbe skip                             # If difference is less than or equal, skip update
 
         # --- Time update logic (entered if time difference is significant) ---
-        push {addr_crit_section_struct}                 # Push address of Critical Section structure
-        call dword ptr [{addr_enter_crit_func}]         # EnterCriticalSection (synchronize access)
-        push 0                                          # Push 0 (argument for address_time_update_func)
-        call {addr_internal_time_func}                  # Call internal time calculation function
-        add esp, 4                                      # Clean up stack after call (for pushed 0)
-        mov dword ptr [{addr_cached_time_value}], eax   # Store new calculated time value
-        mov dword ptr [{addr_cached_tick_count}], esi   # Update last cached tick count with current tick from ESI
-        push {addr_crit_section_struct}                 # Push address of Critical Section structure
-        call dword ptr [{addr_leave_crit_func}]         # LeaveCriticalSection
+        push {cs}                            # Push address of Critical Section structure
+        call dword ptr [{enter_cs_fn}]       # EnterCriticalSection (synchronize access)
+        push 0                               # Push 0 (argument for address_time_update_func)
+        call {crt_time_fn}                   # Call internal time calculation function
+        add esp, 4                           # Clean up stack after call (for pushed 0)
+        mov dword ptr [{cached_time}], eax   # Store new calculated time value
+        mov dword ptr [{cached_tick}], esi   # Update last cached tick count with current tick from ESI
+        push {cs}                            # Push address of Critical Section structure
+        call dword ptr [{leave_cs_fn}]       # LeaveCriticalSection
     skip:
         # --- Time calculation for return value ---
-        mov eax, dword ptr [{addr_cached_tick_count}]   # Load last cached tick count into EAX
-        mov ecx, dword ptr [{addr_cached_time_value}]   # Load cached time value into ECX
-        .byte 0x2B, 0xF0                                # sub esi, eax (ESI holds current tick, EAX last tick. ESI = current_tick - last_tick)
-        mov eax, 0x10624DD3                             # Magic number for time scaling (specific to D2's timing algorithm)
-        mul esi                                         # Multiply EAX by ESI (signed multiplication)
-        .byte 0x8B, 0xC2                                # mov eax, edx (EDX holds the high part of the mul result, which is the scaled tick difference)
-        pop esi                                         # Restore ESI register
-        shr eax, 6                                      # Shift right by 6 (divide by 64) for further scaling
-        .byte 0x03, 0xC1                                # add eax, ecx (Add scaled tick difference to cached time value)
-        ret                                             # Return with calculated time in EAX
+        mov eax, dword ptr [{cached_tick}]   # Load last cached tick count into EAX
+        mov ecx, dword ptr [{cached_time}]   # Load cached time value into ECX
+        .byte 0x2B, 0xF0                     # sub esi, eax (ESI holds current tick, EAX last tick. ESI = current_tick - last_tick)
+        mov eax, 0x10624DD3                  # Magic number for time scaling (specific to D2's timing algorithm)
+        mul esi                              # Multiply EAX by ESI (signed multiplication)
+        .byte 0x8B, 0xC2                     # mov eax, edx (EDX holds the high part of the mul result, which is the scaled tick difference)
+        pop esi                              # Restore ESI register
+        shr eax, 6                           # Shift right by 6 (divide by 64) for further scaling
+        .byte 0x03, 0xC1                     # add eax, ecx (Add scaled tick difference to cached time value)
+        ret                                  # Return with calculated time in EAX
     """
 #endregion
 
-def locate_time_initializer(address_time_init, binary, code_section):
+
+def locate_time_initializer(init_time_ord, binary, code_section):
     """
     Identifies the internal implementation of the time initializer routine exported by Fog.dll.
 
@@ -364,7 +353,7 @@ def locate_time_initializer(address_time_init, binary, code_section):
     This function disassembles the wrapper and extracts the target address of the `call` preceding the `lea`.
 
     Args:
-        address_time_init (int): Virtual address of the exported time initializer routine.
+        init_time_ord (int): Virtual address of the exported time initializer routine.
         binary (lief.PE.Binary): Parsed LIEF PE binary object.
         code_section (lief.PE.Section): The `.text` (code) section from the binary.
 
@@ -375,19 +364,18 @@ def locate_time_initializer(address_time_init, binary, code_section):
         RuntimeError: If the expected instruction pattern (a `call` followed by `lea`) is not found.
     """
     print(Fore.GREEN + "\n  Locating time initializer function...")
-    instructions = disassemble_function(address_time_init, binary, code_section)
+    insts = disassemble_function(init_time_ord, binary, code_section)
 
-    for idx, instr in enumerate(instructions):
-        if instr.mnemonic == "lea":
-            if idx > 0:
-                previous_instr = instructions[idx - 1]
-                if previous_instr.mnemonic == "call":
-                    return previous_instr.operands[0].value.imm
+    for idx, instr in enumerate(insts):
+        if instr.mnemonic == "lea" and idx > 0:
+            prev_inst = insts[idx - 1]
+            if prev_inst.mnemonic == "call":
+                return prev_inst.operands[0].value.imm
 
     raise RuntimeError("Could not locate time initializer function pattern.")
 
 
-def extract_critical_section_address(addr_time_init_func: int, addr_initialize_crit: int, binary, code_section) -> int:
+def locate_critical_section_struct(init_time_fn: int, init_cs_fn: int, binary, code_section) -> int:
     """
     Identifies the global CRITICAL_SECTION structure used by Fog.dll's time system by analyzing its time initialization
     function.
@@ -401,8 +389,8 @@ def extract_critical_section_address(addr_time_init_func: int, addr_initialize_c
     is returned as the CRITICAL_SECTION's address.
 
     Args:
-        addr_time_init_func (int): Virtual address of the internal time initialization function.
-        addr_initialize_crit (int): IAT address of InitializeCriticalSection.
+        init_time_fn (int): Virtual address of the internal time initialization function.
+        init_cs_fn (int): IAT address of InitializeCriticalSection.
         binary (lief.PE.Binary): The parsed PE binary object.
         code_section (lief.PE.Section): The `.text` (code) section from the binary.
 
@@ -412,24 +400,23 @@ def extract_critical_section_address(addr_time_init_func: int, addr_initialize_c
     Raises:
         RuntimeError: If the expected instruction pattern is not found.
     """
-    instructions = disassemble_function(addr_time_init_func, binary, code_section)
+    insts = disassemble_function(init_time_fn, binary, code_section)
 
-    for i in range(len(instructions) - 1):
-        push_instr = instructions[i]
-        call_instr = instructions[i + 1]
+    for i in range(len(insts) - 1):
+        push_instr = insts[i]
+        call_instr = insts[i + 1]
 
         if push_instr.mnemonic == "push" and call_instr.mnemonic == "call":
-            if (call_instr.operands and
-                call_instr.operands[0].type == X86_OP_MEM and
-                    call_instr.operands[0].value.mem.disp == addr_initialize_crit):
-
-                if push_instr.operands and push_instr.operands[0].type == X86_OP_IMM:
-                    return push_instr.operands[0].value.imm
+            push_ops = push_instr.operands
+            call_ops = call_instr.operands
+            if (push_ops and push_ops[0].type == X86_OP_IMM and
+                call_ops and call_ops[0].type == X86_OP_MEM and call_ops[0].value.mem.disp == init_cs_fn):
+                return push_ops[0].value.imm
 
     raise RuntimeError("Failed to locate critical section address near call to InitializeCriticalSection.")
 
 
-def extract_internal_time_function_and_cache_address(address_time_wrapper, address_get_tickcount_iat, binary, code_section):
+def locate_crt_time_and_cache_region(calc_time_ord, get_tick_fn, binary, code_section):
     """
     Identifies addresses related to Fog.dll's internal time computation and its shared atomic memory region by analyzing
     the exported time wrapper function.
@@ -454,8 +441,8 @@ def extract_internal_time_function_and_cache_address(address_time_wrapper, addre
         #   [0x4] = tick count (DWORD)
 
     Args:
-        address_time_wrapper (int): Virtual address of the exported time wrapper function.
-        address_get_tickcount_iat (int): IAT address of GetTickCount.
+        calc_time_ord (int): Virtual address of the exported time wrapper function.
+        get_tick_fn (int): IAT address of GetTickCount.
         binary (lief.PE.Binary): The parsed PE binary object.
         code_section (lief.PE.Section): The `.text` section containing executable code.
 
@@ -467,32 +454,32 @@ def extract_internal_time_function_and_cache_address(address_time_wrapper, addre
     Raises:
         RuntimeError: If expected instruction patterns are not found.
     """
-    print(Fore.GREEN + "\n  Extracting internal time function and cache address...")
-    instructions = disassemble_function(address_time_wrapper, binary, code_section)
-    addr_internal_time_func = None
-    addr_cache_region = None
+    print(Fore.GREEN + "\n  Extracting CRT time() function and cache region...")
+    insts = disassemble_function(calc_time_ord, binary, code_section)
+    crt_time_fn = None
+    cache_region = None
 
-    for idx, instr in enumerate(instructions):
+    for idx, inst in enumerate(insts):
         # Look for `push 0` followed by `call <imm>` to locate the internal function
-        if addr_internal_time_func is None and instr.mnemonic == "push" and instr.op_str == "0":
-            if idx + 1 < len(instructions):
-                next_instr = instructions[idx + 1]
+        if crt_time_fn is None and inst.mnemonic == "push" and inst.op_str == "0":
+            if idx + 1 < len(insts):
+                next_instr = insts[idx + 1]
                 if next_instr.mnemonic == "call":
-                    addr_internal_time_func = next_instr.operands[0].value.imm
+                    crt_time_fn = next_instr.operands[0].value.imm
 
         # Look for `mov reg, [GetTickCount@IAT]`, then `mov [addr], imm` — the address is the shared 8-byte region
-        if addr_cache_region is None and instr.mnemonic == "mov" and len(instr.operands) > 1:
-            if instr.operands[1].type == X86_OP_MEM and instr.operands[1].mem.disp == address_get_tickcount_iat:
-                if idx + 2 < len(instructions):
-                    next_instr = instructions[idx + 2]
-                    if next_instr.mnemonic == "mov" and len(next_instr.operands) > 1 \
-                            and next_instr.operands[1].type == X86_OP_IMM:
-                        addr_cache_region = next_instr.operands[1].value.imm
+        if cache_region is None and inst.mnemonic == "mov" and len(inst.operands) > 1:
+            if inst.operands[1].type == X86_OP_MEM and inst.operands[1].mem.disp == get_tick_fn:
+                if idx + 2 < len(insts):
+                    next_instr = insts[idx + 2]
+                    ops = next_instr.operands
+                    if next_instr.mnemonic == "mov" and len(ops) > 1 and ops[1].type == X86_OP_IMM:
+                        cache_region = next_instr.operands[1].value.imm
 
-    if addr_internal_time_func is None or addr_cache_region is None:
+    if crt_time_fn is None or cache_region is None:
         raise RuntimeError("Failed to locate time function and shared memory region.")
 
-    return addr_internal_time_func, addr_cache_region
+    return crt_time_fn, cache_region
 
 
 def patch_fog_dll(file_path):
@@ -517,10 +504,7 @@ def patch_fog_dll(file_path):
 
         # Version detection - determine the game version from the PE timestamp.
         timestamp = binary.header.time_date_stamps
-
-
         current_version_name = FOG_DLL_VERSION_BY_TIMESTAMP.get(timestamp, "Unknown")
-
         print_aligned_message("Fog.dll Version", current_version_name, Fore.BLUE, Style.BRIGHT + Fore.WHITE, 30)
         print_aligned_message("Timestamp", f"0x{timestamp:08X}", Fore.BLUE, Style.BRIGHT + Fore.WHITE, 30)
 
@@ -545,60 +529,52 @@ def patch_fog_dll(file_path):
         # Exported functions from Fog.dll (resolved by ordinal; varies by D2 version)
         if timestamp < VERSION_107_TIMESTAMP or timestamp == VERSION_106B_TIMESTAMP:
             # Versions 1.06 and 1.06b use these ordinals
-            addr_time_init_ord = resolve_exported_symbol(binary, 10017)  # Time initialization routine
-            addr_time_calc_ord = resolve_exported_symbol(binary, 10036)  # Main time retrieval routine
+            init_time_ord = resolve_exported_symbol(binary, 10017)  # Time initialization routine
+            calc_time_ord = resolve_exported_symbol(binary, 10036)  # Main time retrieval routine
         else:
             # Versions 1.07 and higher use these ordinals
-            addr_time_init_ord = resolve_exported_symbol(binary, 10019)  # Time initialization routine
-            addr_time_calc_ord = resolve_exported_symbol(binary, 10055)  # Main time retrieval routine
+            init_time_ord = resolve_exported_symbol(binary, 10019)  # Time initialization routine
+            calc_time_ord = resolve_exported_symbol(binary, 10055)  # Main time retrieval routine
 
         # Imported Windows API functions (resolved by name from the export table or IAT)
-        addr_init_crit_func = resolve_imported_symbol(binary, "InitializeCriticalSection")
-        addr_get_tick_func = resolve_imported_symbol(binary, "GetTickCount")
-        addr_enter_crit_func = resolve_imported_symbol(binary, "EnterCriticalSection")
-        addr_leave_crit_func = resolve_imported_symbol(binary, "LeaveCriticalSection")
+        init_cs_fn  = resolve_imported_symbol(binary, "InitializeCriticalSection")
+        get_tick_fn = resolve_imported_symbol(binary, "GetTickCount")
+        enter_cs_fn = resolve_imported_symbol(binary, "EnterCriticalSection")
+        leave_cs_fn = resolve_imported_symbol(binary, "LeaveCriticalSection")
 
-        # Address extraction - locate time logic and global state.
-        addr_time_init_func = locate_time_initializer(addr_time_init_ord, binary, code_section)
+        # Locate and extract time initialization function
+        init_time_fn = locate_time_initializer(init_time_ord, binary, code_section)
 
-        addr_crit_section_struct = extract_critical_section_address(
-            addr_time_init_func,
-            addr_init_crit_func,
-            binary, code_section)
+        # Locate and extract the CRITICAL_SECTION structure
+        cs = locate_critical_section_struct(init_time_fn, init_cs_fn, binary, code_section)
 
-        addr_internal_time_func, addr_cache_region = extract_internal_time_function_and_cache_address(
-            addr_time_calc_ord,
-            addr_get_tick_func,
-            binary,
-            code_section)
+        # Locate and extract the C runtime time() function and cache region
+        crt_time_fn, cache_region = locate_crt_time_and_cache_region(calc_time_ord, get_tick_fn, binary, code_section)
 
-        if addr_cache_region:
-            addr_cached_time_value = addr_cache_region
-            addr_cached_tick_count = addr_cache_region + 0x4
-        else:
-            addr_cached_time_value = 0
-            addr_cached_tick_count = 0
+        # Assign cache addresses if region is defined; otherwise default to 0.
+        cached_time = cache_region or 0
+        cached_tick = cached_time + 0x4 if cache_region else 0
 
         # Display all resolved addresses for verification and debugging purposes
         symbol_map = {
             # Imported Windows API functions
-            "IAT_InitializeCriticalSection":  addr_init_crit_func,
-            "IAT_EnterCriticalSection":       addr_enter_crit_func,
-            "IAT_LeaveCriticalSection":       addr_leave_crit_func,
-            "IAT_GetTickCount":               addr_get_tick_func,
+            "IAT:InitializeCriticalSection": init_cs_fn,
+            "IAT:EnterCriticalSection":      enter_cs_fn,
+            "IAT:LeaveCriticalSection":      leave_cs_fn,
+            "IAT:GetTickCount":              get_tick_fn,
 
             # Exported ordinals from Fog.dll
-            "Fog.dll_Ordinal_TimeInit":       addr_time_init_ord,
-            "Fog.dll_Ordinal_TimeCalc":       addr_time_calc_ord,
+            "ORD:InitTime":                  init_time_ord,
+            "ORD:CalcTime":                  calc_time_ord,
 
             # Discovered internal function addresses
-            "Fog.dll_TimeInit_Function":      addr_time_init_func,
-            "Fog.dll_InternalTime_Function":  addr_internal_time_func,
+            "FUNC:InitTime":                 init_time_fn,
+            "FUNC:msvcrt_time":              crt_time_fn,
 
             # Global state addresses
-            "Fog.dll_CachedTime_Global":      addr_cached_time_value,
-            "Fog.dll_CachedTickCount_Global": addr_cached_tick_count,
-            "Fog.dll_CriticalSection_Global": addr_crit_section_struct,
+            "GLOB:CachedTime":               cached_time,
+            "GLOB:CachedTickCount":          cached_tick,
+            "GLOB:CriticalSection":          cs,
         }
 
         print(Fore.GREEN + "\n  Resolved symbols:")
@@ -607,14 +583,9 @@ def patch_fog_dll(file_path):
                 raise ValueError(f"  {name} is zero or undefined. Cannot proceed without this address.")
             print_aligned_message(name, f"0x{addr:08X}", Fore.BLUE, Style.BRIGHT + Fore.WHITE, 30)
 
-        # Assembly generation - create the assembly code for the time initialization and main retrieval functions.
-        asm_init = get_time_init_asm(
-            addr_crit_section_struct, addr_init_crit_func, addr_internal_time_func, addr_cached_time_value,
-            addr_get_tick_func, addr_cached_tick_count)
-
-        asm_main = get_main_time_retrieval_asm(
-            addr_get_tick_func, addr_cached_tick_count, addr_crit_section_struct, addr_enter_crit_func,
-            addr_internal_time_func, addr_cached_time_value, addr_leave_crit_func)
+        # Assembly generation - create the assembly code for the time initialization and calculation functions.
+        init_asm = init_time_asm(cs, init_cs_fn, crt_time_fn, cached_time, get_tick_fn, cached_tick)
+        calc_asm = calc_time_asm(get_tick_fn, cached_tick, cs, enter_cs_fn, crt_time_fn, cached_time, leave_cs_fn)
 
         # Patch injection - write assembled instructions into the binary.
         print(Fore.GREEN + "\n  Patching functions...")
@@ -622,8 +593,8 @@ def patch_fog_dll(file_path):
         # Initialize the Keystone assembler for generating machine code from assembly
         assembler = Ks(KS_ARCH_X86, KS_MODE_32)
 
-        apply_patch(addr_time_init_func, asm_init, assembler, binary, code_section)
-        apply_patch(addr_time_calc_ord, asm_main, assembler, binary, code_section)
+        apply_patch(init_time_fn, init_asm, assembler, binary, code_section)
+        apply_patch(calc_time_ord, calc_asm, assembler, binary, code_section)
 
         # File saving - write the modified binary back to disk.
         print()
