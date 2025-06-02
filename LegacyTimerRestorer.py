@@ -31,6 +31,62 @@ import shutil
 init(autoreset=True)
 
 # --------------------------------------------------------------------------
+# Known Diablo II Fog.dll Version Timestamps
+# --------------------------------------------------------------------------
+
+VERSION_100_TIMESTAMP       = 0x392ec7d4
+VERSION_101_TIMESTAMP       = 0x3957d5f7
+VERSION_102_TIMESTAMP       = 0x3966576f
+VERSION_103_TIMESTAMP       = 0x3986136c
+VERSION_104B_TIMESTAMP      = 0x3a3b5c92
+VERSION_104C_TIMESTAMP      = 0x3a3b5c92
+VERSION_105_TIMESTAMP       = 0x3a720eee
+VERSION_105B_TIMESTAMP      = 0x3a79c9d4
+VERSION_106_TIMESTAMP       = 0x3ade4595
+VERSION_106B_TIMESTAMP      = 0x3b02c8ec
+VERSION_107_TIMESTAMP       = 0x3af6e1d9
+VERSION_108_TIMESTAMP       = 0x3b2eb277
+VERSION_109_TIMESTAMP       = 0x3b7c4e0f
+VERSION_109B_TIMESTAMP      = 0x3b7c4e0f
+VERSION_109D_TIMESTAMP      = 0x3c06fcd3
+VERSION_100_BETA1_TIMESTAMP = 0x3f0472c7
+VERSION_100_BETA2_TIMESTAMP = 0x3f24b36e
+VERSION_110_TIMESTAMP       = 0x3f8a5c4f
+VERSION_111_TIMESTAMP       = 0x42e6c1f0
+VERSION_111B_TIMESTAMP      = 0x43028af2
+VERSION_112A_TIMESTAMP      = 0x483cb768
+VERSION_113_TIMESTAMP       = 0x4b95c0aa
+VERSION_113C_TIMESTAMP      = 0x4b95c0aa
+VERSION_113D_TIMESTAMP      = 0x4e9de32b
+
+FOG_DLL_VERSION_BY_TIMESTAMP  = {
+    VERSION_100_TIMESTAMP:       "1.00",
+    VERSION_101_TIMESTAMP:       "1.01",
+    VERSION_102_TIMESTAMP:       "1.02",
+    VERSION_103_TIMESTAMP:       "1.03",
+    VERSION_104B_TIMESTAMP:      "1.04b | 1.04c",
+    VERSION_104C_TIMESTAMP:      "1.04b | 1.04c",
+    VERSION_105_TIMESTAMP:       "1.05",
+    VERSION_105B_TIMESTAMP:      "1.05b",
+    VERSION_106_TIMESTAMP:       "1.06",
+    VERSION_106B_TIMESTAMP:      "1.06b",
+    VERSION_107_TIMESTAMP:       "1.07",
+    VERSION_108_TIMESTAMP:       "1.08",
+    VERSION_109_TIMESTAMP:       "1.09 | 1.09b",
+    VERSION_109B_TIMESTAMP:      "1.09 | 1.09b",
+    VERSION_109D_TIMESTAMP:      "1.09d",
+    VERSION_100_BETA1_TIMESTAMP: "1.00 Beta 1",
+    VERSION_100_BETA2_TIMESTAMP: "1.00 Beta 2",
+    VERSION_110_TIMESTAMP:       "1.10",
+    VERSION_111_TIMESTAMP:       "1.11",
+    VERSION_111B_TIMESTAMP:      "1.11b",
+    VERSION_112A_TIMESTAMP:      "1.12a",
+    VERSION_113_TIMESTAMP:       "1.13 | 1.13c",
+    VERSION_113C_TIMESTAMP:      "1.13 | 1.13c",
+    VERSION_113D_TIMESTAMP:      "1.13d",
+}
+
+# --------------------------------------------------------------------------
 # Utility Functions
 # --------------------------------------------------------------------------
 
@@ -358,63 +414,11 @@ def patch_fog_dll(file_path):
         if binary is None:
             raise RuntimeError("Failed to parse the binary. Please ensure it's a valid PE file.")
 
-    # Version detection - determine the game version from the PE timestamp.
+        # Version detection - determine the game version from the PE timestamp.
         timestamp = binary.header.time_date_stamps
 
-        # Define timestamps for known Diablo II Fog.dll versions. These values are derived from various D2 releases.
-        VERSION_100_TIMESTAMP       = 0x392ec7d4
-        VERSION_101_TIMESTAMP       = 0x3957d5f7
-        VERSION_102_TIMESTAMP       = 0x3966576f
-        VERSION_103_TIMESTAMP       = 0x3986136c
-        VERSION_104B_TIMESTAMP      = 0x3a3b5c92
-        VERSION_104C_TIMESTAMP      = 0x3a3b5c92
-        VERSION_105_TIMESTAMP       = 0x3a720eee
-        VERSION_105B_TIMESTAMP      = 0x3a79c9d4
-        VERSION_106_TIMESTAMP       = 0x3ade4595
-        VERSION_106B_TIMESTAMP      = 0x3b02c8ec
-        VERSION_107_TIMESTAMP       = 0x3af6e1d9
-        VERSION_108_TIMESTAMP       = 0x3b2eb277
-        VERSION_109_TIMESTAMP       = 0x3b7c4e0f
-        VERSION_109B_TIMESTAMP      = 0x3b7c4e0f
-        VERSION_109D_TIMESTAMP      = 0x3c06fcd3
-        VERSION_100_BETA1_TIMESTAMP = 0x3f0472c7
-        VERSION_100_BETA2_TIMESTAMP = 0x3f24b36e
-        VERSION_110_TIMESTAMP       = 0x3f8a5c4f
-        VERSION_111_TIMESTAMP       = 0x42e6c1f0
-        VERSION_111B_TIMESTAMP      = 0x43028af2
-        VERSION_112A_TIMESTAMP      = 0x483cb768
-        VERSION_113_TIMESTAMP       = 0x4b95c0aa
-        VERSION_113C_TIMESTAMP      = 0x4b95c0aa
-        VERSION_113D_TIMESTAMP      = 0x4e9de32b
 
-        version_names = {
-            VERSION_100_TIMESTAMP:       "1.00",
-            VERSION_101_TIMESTAMP:       "1.01",
-            VERSION_102_TIMESTAMP:       "1.02",
-            VERSION_103_TIMESTAMP:       "1.03",
-            VERSION_104B_TIMESTAMP:      "1.04b | 1.04c",
-            VERSION_104C_TIMESTAMP:      "1.04b | 1.04c",
-            VERSION_105_TIMESTAMP:       "1.05",
-            VERSION_105B_TIMESTAMP:      "1.05b",
-            VERSION_106_TIMESTAMP:       "1.06",
-            VERSION_106B_TIMESTAMP:      "1.06b",
-            VERSION_107_TIMESTAMP:       "1.07",
-            VERSION_108_TIMESTAMP:       "1.08",
-            VERSION_109_TIMESTAMP:       "1.09 | 1.09b",
-            VERSION_109B_TIMESTAMP:      "1.09 | 1.09b",
-            VERSION_109D_TIMESTAMP:      "1.09d",
-            VERSION_100_BETA1_TIMESTAMP: "1.00 Beta 1",
-            VERSION_100_BETA2_TIMESTAMP: "1.00 Beta 2",
-            VERSION_110_TIMESTAMP:       "1.10",
-            VERSION_111_TIMESTAMP:       "1.11",
-            VERSION_111B_TIMESTAMP:      "1.11b",
-            VERSION_112A_TIMESTAMP:      "1.12a",
-            VERSION_113_TIMESTAMP:       "1.13 | 1.13c",
-            VERSION_113C_TIMESTAMP:      "1.13 | 1.13c",
-            VERSION_113D_TIMESTAMP:      "1.13d",
-        }
-
-        current_version_name = version_names.get(timestamp, "Unknown")
+        current_version_name = FOG_DLL_VERSION_BY_TIMESTAMP.get(timestamp, "Unknown")
 
         print_aligned_message("Fog.dll Version", current_version_name, Fore.BLUE, Style.BRIGHT + Fore.WHITE, 30)
         print_aligned_message("Timestamp", f"0x{timestamp:08X}", Fore.BLUE, Style.BRIGHT + Fore.WHITE, 30)
