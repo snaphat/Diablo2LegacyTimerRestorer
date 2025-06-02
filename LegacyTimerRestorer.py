@@ -344,29 +344,25 @@ def calc_time_asm(get_tick_fn, cached_tick, cs, enter_cs_fn, crt_time_fn, cached
 
 def locate_time_initializer(init_game_ord, binary, code_section):
     """
-    Identifies the internal implementation of the time initializer routine exported by Fog.dll.
+    Locates the internal time initialization routine invoked by the game's global initializer.
 
-    The exported ordinal (e.g., 10017 or 10019) refers to a thin wrapper function that delegates to the actual internal
-    initializer. This wrapper typically uses a `call` to the internal function, followed immediately by a `lea`
-    instruction which sets up a local variable or frame using the return address from the call (a common idiom for
-    position-independent logic).
-
-    The instruction pattern matched is:
+    This function disassembles the instructions starting at the exported entry point and searches for the pattern:
         call <imm>       # call to internal initializer
-        lea reg, [esp+X] # retrieve return address or setup frame
+        lea reg, [esp+X] # frame or return address setup
 
-    This function disassembles the wrapper and extracts the target address of the `call` preceding the `lea`.
+    The target of the `call` is returned as the internal time initializer. This pattern is used to identify the true
+    implementation address within a larger global setup function.
 
     Args:
-        init_time_ord (int): Virtual address of the exported time initializer routine.
+        init_game_ord (int): Virtual address of the exported global initialization function.
         binary (lief.PE.Binary): Parsed LIEF PE binary object.
-        code_section (lief.PE.Section): The `.text` (code) section from the binary.
+        code_section (lief.PE.Section): The `.text` section containing executable code.
 
     Returns:
-        int: Virtual address of the internal time initialization function.
+        int: Virtual address of the internal time initializer.
 
     Raises:
-        RuntimeError: If the expected instruction pattern (a `call` followed by `lea`) is not found.
+        RuntimeError: If the expected `call` followed by `lea` pattern is not found.
     """
 
     print(Fore.GREEN + "\n  Locating internal time initializer function...")
@@ -374,37 +370,37 @@ def locate_time_initializer(init_game_ord, binary, code_section):
 
     for idx, instr in enumerate(insts):
         if instr.mnemonic == "lea" and idx > 0:
-            prev_inst = insts[idx - 1]
-            if prev_inst.mnemonic == "call":
-                return prev_inst.operands[0].value.imm
+            prev = insts[idx - 1]
+            if prev.mnemonic == "call" and prev.operands[0].type == X86_OP_IMM:
+                return prev.operands[0].value.imm
 
     raise RuntimeError("Failed to locate internal time initializer: expected call + lea pattern not found.")
 
 
 def locate_critical_section_struct(init_time_fn: int, init_cs_fn: int, binary, code_section) -> int:
     """
-    Identifies the global CRITICAL_SECTION structure used by Fog.dll's time system by analyzing its time initialization
-    function.
+    Identifies the address of the global CRITICAL_SECTION used by Fog.dll's time system by analyzing its internal time
+    initialization function.
 
-    The pattern it matches corresponds to static initialization of a CRITICAL_SECTION structure:
-        push <imm>                       # push address of static CRITICAL_SECTION
-        call [InitializeCriticalSection] # call to IAT thunk
+    The matched instruction pattern corresponds to a call that initializes a CRITICAL_SECTION:
+        push <imm>                        # address of CRITICAL_SECTION object
+        call [InitializeCriticalSection] # indirect call via IAT
 
-    The function disassembles the internal time initialization routine and searches for a `push` followed immediately by
-    a `call` instruction. If the call target resolves to the IAT address of InitializeCriticalSection, the pushed value
-    is returned as the CRITICAL_SECTION's address.
+    This function disassembles the instructions at the specified initializer function and searches for this `push` +
+    `call` sequence. If the call target matches the IAT address of InitializeCriticalSection, the pushed immediate is
+    returned as the address of the CRITICAL_SECTION.
 
     Args:
         init_time_fn (int): Virtual address of the internal time initialization function.
         init_cs_fn (int): IAT address of InitializeCriticalSection.
-        binary (lief.PE.Binary): The parsed PE binary object.
-        code_section (lief.PE.Section): The `.text` (code) section from the binary.
+        binary (lief.PE.Binary): Parsed PE binary object.
+        code_section (lief.PE.Section): `.text` section of the binary.
 
     Returns:
-        int: Virtual address of the global CRITICAL_SECTION structure.
+        int: Virtual address of the CRITICAL_SECTION structure.
 
     Raises:
-        RuntimeError: If the expected instruction pattern is not found.
+        RuntimeError: If the expected pattern is not found.
     """
     insts = disassemble_function(init_time_fn, binary, code_section)
 
@@ -424,41 +420,41 @@ def locate_critical_section_struct(init_time_fn: int, init_cs_fn: int, binary, c
 
 def locate_crt_time_and_cache_region(calc_time_ord, get_tick_fn, binary, code_section):
     """
-    Identifies addresses related to Fog.dll's internal time computation and its shared atomic memory region by analyzing
-    the exported time wrapper function.
+    Identifies addresses used by Fog.dll's internal time computation logic and its associated shared memory region by
+    analyzing the exported time calculation routine.
 
-    The exported ordinal (e.g., 10036/10055) refers to a wrapper that:
-      1. Calls the internal time calculation function with a dummy parameter.
-      2. Retrieves the system tick count via GetTickCount.
-      3. Stores both values to a shared 8-byte global memory region, typically via an atomic update sequence.
+    The exported ordinal (e.g., 10036 or 10055) typically performs the following:
+      1. Calls an internal time computation function with a dummy parameter.
+      2. Invokes GetTickCount via IAT.
+      3. Stores the results (time and tick count) in a shared 8-byte global memory region.
 
-    This routine matches two instruction patterns:
-    - Pattern 1: Identifies the internal function used to calculate time.
-        push 0                  # dummy/default parameter
-        call <imm>              # call internal time calculation routine
+    This routine identifies two patterns:
+    - Pattern 1: Locates the internal time function.
+        push 0                  # push dummy/default argument
+        call <imm>              # call to internal time() logic (e.g., msvcrt.time)
 
-    - Pattern 2: Identifies the base address of the 8-byte global memory region.
-        mov eax, [GetTickCount] # load from IAT
+    - Pattern 2: Locates the base of the shared 8-byte memory region.
+        mov eax, [GetTickCount] # load tick count from IAT
         ...
-        mov [addr], eax         # store tick count or time value to global region
+        mov [addr], eax         # store into global region (tick or time value)
         ...
-        # The region is assumed to hold:
-        #   [0x0] = time result (DWORD)
-        #   [0x4] = tick count (DWORD)
+        # Layout:
+        #   [addr + 0x0] = cached time (DWORD)
+        #   [addr + 0x4] = cached tick count (DWORD)
 
     Args:
-        calc_time_ord (int): Virtual address of the exported time wrapper function.
+        calc_time_ord (int): Virtual address of the exported wrapper function.
         get_tick_fn (int): IAT address of GetTickCount.
-        binary (lief.PE.Binary): The parsed PE binary object.
-        code_section (lief.PE.Section): The `.text` section containing executable code.
+        binary (lief.PE.Binary): Parsed PE binary object.
+        code_section (lief.PE.Section): `.text` section of the binary.
 
     Returns:
-        tuple[int, int]: A tuple containing:
-            - Address of the internal time calculation function.
-            - Base address of the 8-byte global memory region used to store time and tick count.
+        tuple[int, int]:
+            - Virtual address of the internal time function.
+            - Base address of the 8-byte shared memory region.
 
     Raises:
-        RuntimeError: If expected instruction patterns are not found.
+        RuntimeError: If the required instruction patterns are not found.
     """
     print(Fore.GREEN + "\n  Extracting CRT time() function and cache region...")
     insts = disassemble_function(calc_time_ord, binary, code_section)
