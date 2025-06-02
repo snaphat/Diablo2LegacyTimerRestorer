@@ -651,6 +651,17 @@ def patch_fog_dll(file_path: str, output_dir: Optional[str] = None) -> bool:
 
 
 def main() -> int:
+    """
+    Searches for Fog.dll files to patch and applies the legacy timer restoration patch.
+
+    - If --output-dir is specified, performs a recursive search from the current directory,
+      skipping any path under the output directory, and writes patched files there.
+    - If --output-dir is not provided, searches only the current directory and patches in place.
+    - Reports which files were found, which were patched, and which (if any) failed.
+
+    Returns:
+        int: Exit code 0 if all patches succeeded or nothing needed patching; 1 if any failed.
+    """
     parser = argparse.ArgumentParser()
     parser.add_argument("--output-dir", help="Directory to write patched files to")
     args = parser.parse_args()
@@ -658,7 +669,7 @@ def main() -> int:
     target_file = "Fog.dll"
     print(Fore.CYAN + f"Searching for '{target_file}'...")
 
-    # Step 1: Determine which Fog.dll files to patch:
+    # Locate Fog.dll files to patch
     # - If --output-dir is specified, recursively search from the current directory,
     #   excluding the output directory itself.
     # - Otherwise, search only the current directory (non-recursively).
@@ -667,7 +678,7 @@ def main() -> int:
         output_abs = os.path.abspath(args.output_dir)
         for root, _, files in os.walk("."):
             if os.path.abspath(root).startswith(output_abs):
-                continue
+                continue  # Skip the output directory
             for file in files:
                 if file.lower() == target_file.lower():
                     found_files.append(os.path.join(root, file))
@@ -678,13 +689,13 @@ def main() -> int:
 
     failed_files = []
 
-    # Step 2: Process discovered files (if any)
+    # Patch each discovered file
     if found_files:
         for file_path in found_files:
             if not patch_fog_dll(file_path, output_dir=args.output_dir):
                 failed_files.append(file_path)
 
-    # Step 3: Final summary and reporting
+    # Summary report
     print(Fore.WHITE + "\n--- Patching Summary ---")
     if not found_files:
         print(Fore.YELLOW + f"No '{target_file}' files were found. Nothing was processed.")
