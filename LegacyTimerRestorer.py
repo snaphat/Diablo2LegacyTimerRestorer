@@ -342,7 +342,7 @@ def calc_time_asm(get_tick_fn, cached_tick, cs, enter_cs_fn, crt_time_fn, cached
 # region: Symbol Locator Functions
 
 
-def locate_time_initializer(init_time_ord, binary, code_section):
+def locate_time_initializer(init_game_ord, binary, code_section):
     """
     Identifies the internal implementation of the time initializer routine exported by Fog.dll.
 
@@ -368,8 +368,9 @@ def locate_time_initializer(init_time_ord, binary, code_section):
     Raises:
         RuntimeError: If the expected instruction pattern (a `call` followed by `lea`) is not found.
     """
-    print(Fore.GREEN + "\n  Locating time initializer function...")
-    insts = disassemble_function(init_time_ord, binary, code_section)
+
+    print(Fore.GREEN + "\n  Locating internal time initializer function...")
+    insts = disassemble_function(init_game_ord, binary, code_section)
 
     for idx, instr in enumerate(insts):
         if instr.mnemonic == "lea" and idx > 0:
@@ -377,7 +378,7 @@ def locate_time_initializer(init_time_ord, binary, code_section):
             if prev_inst.mnemonic == "call":
                 return prev_inst.operands[0].value.imm
 
-    raise RuntimeError("Could not locate time initializer function pattern.")
+    raise RuntimeError("Failed to locate internal time initializer: expected call + lea pattern not found.")
 
 
 def locate_critical_section_struct(init_time_fn: int, init_cs_fn: int, binary, code_section) -> int:
@@ -549,12 +550,12 @@ def patch_fog_dll(file_path, output_dir=None):
         # Exported functions from Fog.dll (resolved by ordinal; varies by D2 version)
         if timestamp < VERSION_107_TIMESTAMP or timestamp == VERSION_106B_TIMESTAMP:
             # Versions 1.06 and 1.06b use these ordinals
-            init_time_ord = resolve_exported_symbol(binary, 10017)  # Time initialization routine
-            calc_time_ord = resolve_exported_symbol(binary, 10036)  # Main time retrieval routine
+            init_game_ord = resolve_exported_symbol(binary, 10017)  # Game initialization routine
+            calc_time_ord = resolve_exported_symbol(binary, 10036)  # Time calculation routine
         else:
             # Versions 1.07 and higher use these ordinals
-            init_time_ord = resolve_exported_symbol(binary, 10019)  # Time initialization routine
-            calc_time_ord = resolve_exported_symbol(binary, 10055)  # Main time retrieval routine
+            init_game_ord = resolve_exported_symbol(binary, 10019)  # Game initialization routine
+            calc_time_ord = resolve_exported_symbol(binary, 10055)  # Time calculation routine
 
         # Imported Windows API functions (resolved by name from the export table or IAT)
         init_cs_fn  = resolve_imported_symbol(binary, "InitializeCriticalSection")
@@ -563,7 +564,7 @@ def patch_fog_dll(file_path, output_dir=None):
         leave_cs_fn = resolve_imported_symbol(binary, "LeaveCriticalSection")
 
         # Locate and extract time initialization function
-        init_time_fn = locate_time_initializer(init_time_ord, binary, code_section)
+        init_time_fn = locate_time_initializer(init_game_ord, binary, code_section)
 
         # Locate and extract the CRITICAL_SECTION structure
         cs = locate_critical_section_struct(init_time_fn, init_cs_fn, binary, code_section)
@@ -584,7 +585,7 @@ def patch_fog_dll(file_path, output_dir=None):
             "IAT:GetTickCount":              get_tick_fn,
 
             # Exported ordinals from Fog.dll
-            "ORD:InitTime":                  init_time_ord,
+            "ORD:InitGame":                  init_game_ord,
             "ORD:CalcTime":                  calc_time_ord,
 
             # Discovered internal function addresses
