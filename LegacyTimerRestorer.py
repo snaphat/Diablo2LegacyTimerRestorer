@@ -429,7 +429,8 @@ def patch_fog_dll(file_path):
             print_aligned_message("Info", "Fog.dll is from a version earlier than 1.06. Patching is not necessary.",
                                   Fore.BLUE, Style.BRIGHT + Fore.WHITE, 30)
             # If no patching is needed, remove the temporary backup to clean up
-            os.remove(backup_path)
+            if os.path.exists(backup_path):
+                os.remove(backup_path)
             return True
 
         # Find the .text section, which contains the executable code
