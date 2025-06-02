@@ -86,10 +86,7 @@ FOG_DLL_VERSION_BY_TIMESTAMP  = {
     VERSION_113D_TIMESTAMP:      "1.13d",
 }
 
-# --------------------------------------------------------------------------
-# Utility Functions
-# --------------------------------------------------------------------------
-
+# region Utility Functions
 
 def print_aligned_message(label, value, label_color, value_color, align_width, indent=4):
     """
@@ -246,6 +243,110 @@ def apply_patch(virtual_address, asm_source, assembler, binary, code_section):
     updated_content[offset:offset + len(patch_bytes)] = patch_bytes
     code_section.content = updated_content  # Assign the modified content back
 
+#endregion
+
+# region Patch Assembly Generation
+def get_time_init_asm(
+    addr_crit_section_struct,
+    addr_init_crit_func,
+    addr_internal_time_func,
+    addr_cached_time_value,
+    addr_get_tick_func,
+    addr_cached_tick_count
+):
+    """
+    Returns the assembly string for initializing the legacy time caching system in Fog.dll.
+
+    This code replaces the logic at a subroutine called by ordinal 10017/10019. It initializes the critical section,
+    calls the internal time function to compute the initial time value, and stores both the time and the current tick
+    count into the appropriate memory addresses for use by the main time retrieval logic.
+
+    Parameters:
+        addr_crit_section_struct (int): Address of the critical section structure.
+        addr_init_crit_func (int):      Address of InitializeCriticalSection.
+        addr_internal_time_func (int):  Address of the internal time calculation function.
+        addr_cached_time_value (int):   Address to store the initial time value.
+        addr_get_tick_func (int):       Address of GetTickCount (or equivalent).
+        addr_cached_tick_count (int):   Address to store the initial tick value.
+
+    Returns:
+        str: Assembly code as a string.
+    """
+    return f"""
+        push {addr_crit_section_struct}                 # Push address of Critical Section structure
+        call dword ptr [{addr_init_crit_func}]          # InitializeCriticalSection
+        push 0                                          # Argument for internal time func (usually 0)
+        call {addr_internal_time_func}                  # Call internal time calculation function
+        add esp, 4                                      # Clean up stack after call
+        mov dword ptr [{addr_cached_time_value}], eax   # Store initial calculated time value
+        call dword ptr [{addr_get_tick_func}]           # Get current tick count
+        mov dword ptr [{addr_cached_tick_count}], eax   # Store initial cached tick count
+        ret                                             # Return
+        """
+
+
+def get_main_time_retrieval_asm(
+    addr_get_tick_func,
+    addr_cached_tick_count,
+    addr_crit_section_struct,
+    addr_enter_crit_func,
+    addr_internal_time_func,
+    addr_cached_time_value,
+    addr_leave_crit_func
+):
+    """
+    Returns the assembly string that implements the restored legacy time retrieval function for Fog.dll, replacing the
+    logic at ordinal 10036/10055.
+
+    This function reconstructs the original critical-section-protected logic for time caching and computation using
+    byte-for-byte opcode compatibility, including `.byte` directives to override Keystone's default encoding when
+    necessary.
+
+    Parameters:
+        addr_get_tick_func (int): Address of GetTickCount (or equivalent).
+        addr_cached_tick_count (int): Address of the last cached tick value.
+        addr_crit_section_struct (int): Address of the critical section struct.
+        addr_enter_crit_func (int): Address of EnterCriticalSection.
+        addr_internal_time_func (int): Address of the internal time calculation function.
+        addr_cached_time_value (int): Address of the cached time value.
+        addr_leave_crit_func (int): Address of LeaveCriticalSection.
+
+    Returns:
+        str: Assembly code as a string.
+    """
+    return f"""
+        push esi                                        # Save ESI register
+        call dword ptr [{addr_get_tick_func}]           # Call GetTickCount to get current tick
+        mov edx, dword ptr [{addr_cached_tick_count}]   # Load last cached tick count into EDX
+        .byte 0x8B, 0xF0                                # mov esi, eax (EAX holds current tick count from GetTickCount)
+        .byte 0x2B, 0xC2                                # sub eax, edx (EAX = current_tick - last_cached_tick)
+        cmp eax, 0x7FFFFFFF                             # Compare difference with 0x7FFFFFFF (large positive number)
+        jbe skip                                        # If difference is less than or equal, skip update
+
+        # --- Time update logic (entered if time difference is significant) ---
+        push {addr_crit_section_struct}                 # Push address of Critical Section structure
+        call dword ptr [{addr_enter_crit_func}]         # EnterCriticalSection (synchronize access)
+        push 0                                          # Push 0 (argument for address_time_update_func)
+        call {addr_internal_time_func}                  # Call internal time calculation function
+        add esp, 4                                      # Clean up stack after call (for pushed 0)
+        mov dword ptr [{addr_cached_time_value}], eax   # Store new calculated time value
+        mov dword ptr [{addr_cached_tick_count}], esi   # Update last cached tick count with current tick from ESI
+        push {addr_crit_section_struct}                 # Push address of Critical Section structure
+        call dword ptr [{addr_leave_crit_func}]         # LeaveCriticalSection
+    skip:
+        # --- Time calculation for return value ---
+        mov eax, dword ptr [{addr_cached_tick_count}]   # Load last cached tick count into EAX
+        mov ecx, dword ptr [{addr_cached_time_value}]   # Load cached time value into ECX
+        .byte 0x2B, 0xF0                                # sub esi, eax (ESI holds current tick, EAX last tick. ESI = current_tick - last_tick)
+        mov eax, 0x10624DD3                             # Magic number for time scaling (specific to D2's timing algorithm)
+        mul esi                                         # Multiply EAX by ESI (signed multiplication)
+        .byte 0x8B, 0xC2                                # mov eax, edx (EDX holds the high part of the mul result, which is the scaled tick difference)
+        pop esi                                         # Restore ESI register
+        shr eax, 6                                      # Shift right by 6 (divide by 64) for further scaling
+        .byte 0x03, 0xC1                                # add eax, ecx (Add scaled tick difference to cached time value)
+        ret                                             # Return with calculated time in EAX
+    """
+#endregion
 
 def locate_time_initializer(address_time_init, binary, code_section):
     """
@@ -506,57 +607,14 @@ def patch_fog_dll(file_path):
                 raise ValueError(f"  {name} is zero or undefined. Cannot proceed without this address.")
             print_aligned_message(name, f"0x{addr:08X}", Fore.BLUE, Style.BRIGHT + Fore.WHITE, 30)
 
-        # Assembly for the main time retrieval function. This code replaces the logic at ordinal 10036/10055). It
-        # reintroduces critical section protection and the older time calculation method.
-        # `.byte` directives are used for specific opcodes that Keystone encodes differently to ensure byte-for-byte
-        # compatibility with the originals.
-        asm_main = f"""
-            push esi                                        # Save ESI register
-            call dword ptr [{addr_get_tick_func}]           # Call GetTickCount to get current tick
-            mov edx, dword ptr [{addr_cached_tick_count}]   # Load last cached tick count into EDX
-            .byte 0x8B, 0xF0                                # mov esi, eax (EAX holds current tick count from GetTickCount)
-            .byte 0x2B, 0xC2                                # sub eax, edx (EAX = current_tick - last_cached_tick)
-            cmp eax, 0x7FFFFFFF                             # Compare difference with 0x7FFFFFFF (large positive number)
-            jbe skip                                        # If difference is less than or equal, skip update
+        # Assembly generation - create the assembly code for the time initialization and main retrieval functions.
+        asm_init = get_time_init_asm(
+            addr_crit_section_struct, addr_init_crit_func, addr_internal_time_func, addr_cached_time_value,
+            addr_get_tick_func, addr_cached_tick_count)
 
-            # --- Time update logic (entered if time difference is significant) ---
-            push {addr_crit_section_struct}                 # Push address of Critical Section structure
-            call dword ptr [{addr_enter_crit_func}]         # EnterCriticalSection (synchronize access)
-            push 0                                          # Push 0 (argument for address_time_update_func)
-            call {addr_internal_time_func}                  # Call internal time calculation function
-            add esp, 4                                      # Clean up stack after call (for pushed 0)
-            mov dword ptr [{addr_cached_time_value}], eax   # Store new calculated time value
-            mov dword ptr [{addr_cached_tick_count}], esi   # Update last cached tick count with current tick from ESI
-            push {addr_crit_section_struct}                 # Push address of Critical Section structure
-            call dword ptr [{addr_leave_crit_func}]         # LeaveCriticalSection
-        skip:
-            # --- Time calculation for return value ---
-            mov eax, dword ptr [{addr_cached_tick_count}]   # Load last cached tick count into EAX
-            mov ecx, dword ptr [{addr_cached_time_value}]   # Load cached time value into ECX
-            .byte 0x2B, 0xF0                                # sub esi, eax (ESI holds current tick, EAX last tick. ESI = current_tick - last_tick)
-            mov eax, 0x10624DD3                             # Magic number for time scaling (specific to D2's timing algorithm)
-            mul esi                                         # Multiply EAX by ESI (signed multiplication)
-            .byte 0x8B, 0xC2                                # mov eax, edx (EDX holds the high part of the mul result, which is the scaled tick difference)
-            pop esi                                         # Restore ESI register
-            shr eax, 6                                      # Shift right by 6 (divide by 64) for further scaling
-            .byte 0x03, 0xC1                                # add eax, ecx (Add scaled tick difference to cached time value)
-            ret                                             # Return with calculated time in EAX
-        """
-
-        # Assembly for the time initialization function. This code replaces the logic at a sub-function called in
-        # ordinal 10017/10019). It initializes the critical section and sets the initial cached time and tick count
-        # values.
-        asm_init = f"""
-            push {addr_crit_section_struct}                 # Push address of Critical Section structure
-            call dword ptr [{addr_init_crit_func}]          # InitializeCriticalSection
-            push 0                                          # Argument for internal time func (usually 0)
-            call {addr_internal_time_func}                  # Call internal time calculation function
-            add esp, 4                                      # Clean up stack after call
-            mov dword ptr [{addr_cached_time_value}], eax   # Store initial calculated time value
-            call dword ptr [{addr_get_tick_func}]           # Get current tick count
-            mov dword ptr [{addr_cached_tick_count}], eax   # Store initial cached tick count
-            ret                                             # Return
-        """
+        asm_main = get_main_time_retrieval_asm(
+            addr_get_tick_func, addr_cached_tick_count, addr_crit_section_struct, addr_enter_crit_func,
+            addr_internal_time_func, addr_cached_time_value, addr_leave_crit_func)
 
         # Patch injection - write assembled instructions into the binary.
         print(Fore.GREEN + "\n  Patching functions...")
