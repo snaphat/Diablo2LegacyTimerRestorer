@@ -48,6 +48,12 @@ python LegacyTimerRestorer.py --output-dir patched/
 
 By default, the script searches for `Fog.dll` in the current directory. When `--output-dir` is provided, it recursively searches all subdirectories (excluding the output directory).
 
+## Prepatched DLLs
+
+A ZIP archive is available containing `Fog.dll` files from [D2VersionChanger](https://github.com/ChaosMarc/D2VersionChanger), prepatched with the legacy timer logic.
+
+You can download the prepatched DLLs from the [Releases section](../../releases).
+
 ## Compatibility
 
 This patch is intended for Diablo II versions **1.06 and above**. It will automatically skip versions where patching is unnecessary (i.e., 1.05b and earlier).
